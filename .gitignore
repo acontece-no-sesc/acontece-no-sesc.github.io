@@ -16,3 +16,10 @@ previa.html
 # pouco compressível, e o site sai do artefato da Action, não do repositório.
 # Para ter uma base local: python coletor.py --dias 60
 dados/eventos.json
+
+# A chave da API do GoatCounter. Nunca versionada: com ela dá para ler o
+# painel inteiro. Crie em Settings -> API tokens e grave aqui.
+.goatcounter-token
+
+# Gerado por painel.py a partir da medição e da coleta.
+painel.html
