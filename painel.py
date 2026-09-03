@@ -28,6 +28,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -98,6 +99,62 @@ def do_csv(caminho):
             caminhos[p] += 1
             total += 1
     return dict(caminhos), total
+
+
+def do_backup(pasta):
+    """O export de backup do GoatCounter: uma tabela por arquivo .jsonl.
+
+    É o que sai de Settings -> Export, e é mais completo que o CSV: traz
+    `paths.jsonl` ({id, path, event}) e `hit_stats.jsonl` ({hour, path_id,
+    count}), que se juntam pelo id. Também traz navegador, sistema e origem,
+    que o painel usa para saber se a amostra é gente ou é teste nosso.
+    """
+    def jl(nome):
+        caminho = os.path.join(pasta, nome)
+        if not os.path.exists(caminho):
+            return []
+        with open(caminho, encoding="utf-8") as f:
+            return [json.loads(l) for l in f if l.strip()]
+
+    paths = {p["id"]: p for p in jl("paths.jsonl")}
+    refs = {r["id"]: (r.get("ref") or "") for r in jl("refs.jsonl")}
+
+    caminhos, total, horas, origens = Counter(), 0, set(), Counter()
+    for h in jl("hit_stats.jsonl"):
+        p = paths.get(h.get("path_id")) or {}
+        alvo = (p.get("path") or "").lstrip("/")
+        n = h.get("count") or 0
+        if p.get("event"):
+            caminhos[alvo] += n
+        else:
+            total += n                      # visita de página, não evento
+        horas.add((h.get("hour") or "")[:13])
+        origens[refs.get(h.get("ref_id"), "") or "(direto)"] += n
+
+    sistemas = Counter()
+    for s in jl("system_stats.jsonl"):
+        sistemas[s.get("name") or "?"] += s.get("count") or 0
+
+    return dict(caminhos), total, {
+        "horas": len(horas),
+        "primeira": min(horas) if horas else None,
+        "ultima": max(horas) if horas else None,
+        "origens": origens.most_common(),
+        "sistemas": sistemas.most_common(),
+    }
+
+
+# Os eventos que o app dispara. A lista está no próprio código; o painel a
+# lê de lá para não sair de sincronia — se alguém instrumentar algo novo e
+# esquecer daqui, a conferência abaixo acusaria falta que não existe.
+def eventos_do_codigo():
+    caminho = os.path.join(RAIZ, "prototipo.html")
+    if not os.path.exists(caminho):
+        return []
+    with open(caminho, encoding="utf-8") as f:
+        s = f.read()
+    achados = re.findall(r'medir\(\s*"([a-z0-9-]+)"', s)
+    return sorted(set(achados))
 
 
 # ------------------------------------------------------------------ contas
@@ -466,6 +523,24 @@ section > header p { margin: 0; color: var(--tinta-2); font-size: 14.5px; max-wi
   font-variant-numeric: tabular-nums; }
 .grade .k { font-size: 12.5px; color: var(--tinta-3); line-height: 1.4; display: block; }
 
+/* ---- conferência da instrumentação ---- */
+.confere { background: var(--carta); border: 1px solid var(--linha); border-radius: 14px;
+  padding: 20px 22px; display: grid; gap: 14px; }
+.confere .placar { margin: 0; font-size: 14.5px; color: var(--tinta-2); }
+.confere .placar b { font-family: "Bricolage Grotesque", sans-serif; font-weight: 800;
+  font-size: 26px; color: var(--tinta); letter-spacing: -.02em; }
+.confere ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.confere li { display: flex; align-items: baseline; gap: 9px; font-size: 13.5px;
+  font-family: ui-monospace, Menlo, monospace; }
+.confere li.viu { color: var(--tinta); }
+.confere li.espera { color: var(--tinta-3); }
+.confere .marca { font-weight: 700; width: 12px; display: inline-block; }
+.confere li.viu .marca { color: var(--bom); }
+.confere li.espera .marca { color: var(--frio); }
+.aviso em { font-style: normal; font-weight: 600; color: var(--tinta); }
+.aviso b { color: var(--tinta); }
+
 rodape, footer { display: block; margin-top: 64px; padding-top: 22px;
   border-top: 1px solid var(--linha); font-size: 13px; color: var(--tinta-3); }
 footer p { max-width: 74ch; }
@@ -496,7 +571,7 @@ def barras(itens):
     return '<div class="barras">%s</div>' % "".join(linhas)
 
 
-def cartao(p):
+def cartao(p, confiavel=True):
     tem = bool(p["valor"])
     partes = ['<article class="cartao%s">' % ("" if tem else " sem-dado")]
     partes.append("<h3>%s</h3>" % esc(p["titulo"]))
@@ -505,7 +580,7 @@ def cartao(p):
                   % (f_n(p["valor"]) if tem else "—", esc(p["unidade"]),
                      ('<span class="base">%s</span>' % esc(p["base"])) if p.get("base") else ""))
     partes.append(barras(p.get("detalhe") or []))
-    if p.get("leitura"):
+    if p.get("leitura") and confiavel:
         partes.append('<p class="leitura">%s</p>' % esc(p["leitura"]))
     if p.get("espera"):
         partes.append('<p class="espera">%s</p>' % esc(p["espera"]))
@@ -513,7 +588,44 @@ def cartao(p):
     return "".join(partes)
 
 
-def montar(g, total, cat, origem):
+MINIMO_PARA_CONCLUIR = 30          # visitas, não eventos
+
+
+def conferencia(g):
+    """Quais eventos instrumentados já se viu disparar ao menos uma vez.
+
+    Numa amostra pequena esta é a única leitura legítima: ela não diz nada
+    sobre comportamento, mas prova que a medição chegou inteira do outro
+    lado — que é exatamente o que se quer saber logo depois de publicar.
+    """
+    no_codigo = eventos_do_codigo()
+    vistos = set(g.keys())
+    return [(e, e in vistos) for e in no_codigo]
+
+
+def bloco_conferencia(g):
+    itens = conferencia(g)
+    if not itens:
+        return ""
+    ok = sum(1 for _, v in itens if v)
+    linhas = "".join(
+        '<li class="%s"><span class="marca">%s</span>%s</li>'
+        % ("viu" if v else "espera", "✓" if v else "·", esc(e))
+        for e, v in itens)
+    return (
+        "<section><header><h2>A medição chegou inteira?</h2>"
+        "<p>Cada evento instrumentado no app, e se já se viu disparar ao menos "
+        "uma vez. Os que faltam pedem uma ação específica — filtrar, buscar sem "
+        "resultado, trocar o alcance da agenda — e o onboarding só dispara uma "
+        "vez por aparelho.</p></header>"
+        '<div class="confere"><p class="placar"><b>%d</b> de %d confirmados</p>'
+        "<ul>%s</ul></div></section>" % (ok, len(itens), linhas))
+
+
+def montar(g, total, cat, origem, ctx=None):
+    # Antes de qualquer leitura: a amostra sustenta conclusão? Abaixo do piso,
+    # as leituras derivadas somem e o painel muda de assunto.
+    confiavel = total >= MINIMO_PARA_CONCLUIR
     ps = perguntas(g, total, cat)
     abertos = soma(g, "abre-evento")
     acoes = soma(g, "calendario") + soma(g, "abre-pagina-oficial") + \
@@ -525,8 +637,15 @@ def montar(g, total, cat, origem):
                 % ("" if n else " vazio", esc(rot), f_n(n) if n else "—", esc(uni),
                    ('<span class="taxa">%s</span>' % esc(taxa)) if taxa else ""))
 
-    t_abre = ("%.0f%% das visitas" % (100.0 * abertos / total)) if (abertos and total) else None
-    t_acao = ("%.0f%% de quem abriu" % (100.0 * acoes / abertos)) if (acoes and abertos) else None
+    # Numa amostra de teste as razões produzem absurdo — "133% de quem abriu",
+    # porque um mesmo evento gera calendário E página oficial. Taxa só aparece
+    # quando há gente suficiente para que ela queira dizer alguma coisa.
+    t_abre = t_acao = None
+    if confiavel:
+        if abertos and total:
+            t_abre = "%.0f%% das visitas" % (100.0 * abertos / total)
+        if acoes and abertos:
+            t_acao = "%.0f%% de quem abriu" % (100.0 * acoes / abertos)
 
     funil = ('<div class="funil">%s%s%s</div>'
              % (degrau("Chegou", total, "visitas"),
@@ -541,7 +660,8 @@ def montar(g, total, cat, origem):
         secoes.append(
             "<section><header><h2>%s</h2><p>%s</p></header>"
             '<div class="cartoes">%s</div></section>'
-            % (esc(titulo), esc(sub), "".join(cartao(p) for p in doGrupo)))
+            % (esc(titulo), esc(sub),
+               "".join(cartao(p, confiavel) for p in doGrupo)))
 
     if cat:
         base = ('<section><header><h2>Os denominadores</h2>'
@@ -561,7 +681,20 @@ def montar(g, total, cat, origem):
     else:
         base = ""
 
-    if total:
+    if total and not confiavel:
+        horas = (ctx or {}).get("horas") or 0
+        aviso = (
+            '<div class="aviso"><h3>Isto é um teste de fumaça, não uso</h3>'
+            "<p>São <b>%s visitas</b> e <b>%s eventos</b>%s. Nesse tamanho, "
+            "nenhuma porcentagem significa coisa alguma — duas pessoas a mais "
+            "mudariam qualquer conclusão —, então as leituras derivadas estão "
+            "suprimidas de propósito. Os números crus continuam à vista.</p>"
+            "<p>O que este volume <em>prova</em> está na seção abaixo: que a "
+            "medição chega inteira do outro lado. Volte quando houver algumas "
+            "centenas de visitas ao longo de dias diferentes.</p></div>"
+            % (f_n(total), f_n(sum(soma(g, e) for e in g)),
+               (" numa única hora" if horas == 1 else " em %d horas" % horas)))
+    elif total:
         aviso = ""
     else:
         aviso = (
@@ -585,9 +718,9 @@ def montar(g, total, cat, origem):
   <header class="capa">
     <span class="rotulo">Medição de uso &middot; sem cookie, sem identificar ninguém</span>
     <h1>O que a medição está dizendo</h1>
-    <p>Dez eventos foram instrumentados para responder a perguntas específicas —
-       não para encher gráfico. Cada cartão traz a pergunta, o número e o
-       denominador contra o qual ele se lê.</p>
+    <p>%(n_eventos)s eventos foram instrumentados para responder a perguntas
+       específicas — não para encher gráfico. Cada cartão traz a pergunta, o
+       número e o denominador contra o qual ele se lê.</p>
     <div class="meta">
       <span><b>Uso:</b> %(origem)s</span>
       <span><b>Catálogo:</b> %(coleta)s</span>
@@ -596,6 +729,7 @@ def montar(g, total, cat, origem):
   </header>
   %(funil)s
   %(aviso)s
+  %(confere)s
   %(secoes)s
   %(base)s
   <footer>
@@ -609,6 +743,8 @@ def montar(g, total, cat, origem):
   </footer>
 </div>""" % {
         "css": CSS, "funil": funil, "aviso": aviso,
+        "confere": bloco_conferencia(g) if total else "",
+        "n_eventos": f_n(len(eventos_do_codigo())) or "Os",
         "secoes": "".join(secoes), "base": base,
         "origem": esc(origem),
         "coleta": esc(cat["coleta"] + " · " + f_n(cat["eventos"]) + " atividades") if cat
@@ -618,13 +754,23 @@ def montar(g, total, cat, origem):
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument("--dir", help="pasta do export de backup do GoatCounter (.jsonl)")
     p.add_argument("--csv", help="export de 'Individual pageviews' do GoatCounter")
     p.add_argument("--dias", type=int, default=90, help="janela a pedir na API")
     p.add_argument("--saida", default="painel.html")
     args = p.parse_args()
 
-    caminhos, total, origem = {}, 0, "sem dados ainda"
-    if args.csv:
+    caminhos, total, origem, ctx = {}, 0, "sem dados ainda", None
+    if args.dir:
+        caminhos, total, ctx = do_backup(args.dir)
+        janela = ""
+        if ctx.get("primeira"):
+            janela = " · %s" % ctx["primeira"].replace("T", ", ") + "h UTC"
+            if ctx["horas"] > 1:
+                janela += " (%d horas)" % ctx["horas"]
+        origem = "export de %s%s" % (
+            os.path.basename(args.dir.rstrip("/\\")), janela)
+    elif args.csv:
         caminhos, total = do_csv(args.csv)
         origem = "CSV de %s · %s acessos" % (os.path.basename(args.csv), f_n(total))
     else:
@@ -639,7 +785,7 @@ def main():
             print("Sem chave e sem --csv: monto só a metade do catálogo.")
 
     cat = catalogo()
-    html = montar(agrupar(caminhos), total, cat, origem)
+    html = montar(agrupar(caminhos), total, cat, origem, ctx)
     with open(os.path.join(RAIZ, args.saida), "w", encoding="utf-8", newline="\n") as f:
         f.write(html)
     print("%s pronto · %s eventos de uso · %s caminhos"

@@ -23,3 +23,6 @@ dados/eventos.json
 
 # Gerado por painel.py a partir da medição e da coleta.
 painel.html
+
+# Export do GoatCounter, baixado a mao para alimentar o painel.
+GoatCounter/
