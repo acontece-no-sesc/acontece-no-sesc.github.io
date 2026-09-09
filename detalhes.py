@@ -75,6 +75,10 @@ RE_RESULTADO = re.compile(
     r"|contemplad[oa]s"
     r"|sortead[oa]s)\s*:?", re.I)
 RE_CODIGO = re.compile(r"[A-Z]{6,12}")
+# O enfeite entre o cabeçalho e a lista: "(em ordem alfabética):". Limitado a
+# 60 caracteres de propósito — um "(" solto no meio da página não pode engolir
+# a lista que vem depois.
+RE_ENFEITE = re.compile(r"^\s*\([^)]{0,60}\)\s*:?\s*")
 RE_DATA_HORA = re.compile(
     r"(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?:\s*,)?(?:\s*[àa]s\s*(\d{1,2})(?:h|:)(\d{2})?)?")
 
@@ -597,11 +601,26 @@ def sorteados_do_corpo(corpo):
     poderão efetivar o pagamento"), e ali não vem código nenhum. A trava é
     exigir que o código apareça nos dois primeiros tokens depois do cabeçalho
     -- em prosa isso nunca acontece.
+
+    O parêntese entre o cabeçalho e a lista é descartado antes da contagem:
+    "Resultado do sorteio **(em ordem alfabética):** DOKFCHWU EKEFDFKT…" põe
+    três tokens de enfeite na frente, a trava desistia no terceiro e a lista
+    inteira ficava para trás. Eram 3 dos 13 sorteios já vencidos em 09/09,
+    com 28, 13 e 13 códigos publicados na página, que o app dava como
+    pendentes — e continuaria dando para sempre, porque a página não muda
+    mais.
+
+    Descartar só o PARÊNTESE, e não "os primeiros N tokens", é o que
+    preserva a trava: prosa depois de "sorteados" não começa com "(". Alargar
+    a janela de tokens traria de volta o falso positivo que a trava existe
+    para evitar -- "o resultado será divulgado na CENTRAL DE ATENDIMENTO"
+    viraria uma lista de dois contemplados.
     """
     melhor = []
     for m in RE_RESULTADO.finditer(corpo):
         codigos = []
-        for k, tok in enumerate(corpo[m.end():m.end() + 4000].split()):
+        resto = RE_ENFEITE.sub("", corpo[m.end():m.end() + 4000], count=1)
+        for k, tok in enumerate(resto.split()):
             t = tok.strip(".,;:()")
             if RE_CODIGO.fullmatch(t):
                 codigos.append(t)

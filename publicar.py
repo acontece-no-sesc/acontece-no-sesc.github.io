@@ -163,7 +163,12 @@ def _agora():
 
 def _local(ev):
     end = ENDERECOS.get(ev.get("uni")) or ev.get("endereco") or ""
-    return esc_ics("Sesc " + (ev.get("uni") or "") + (" — " + end if end else ""))
+    uni = ev.get("uni") or ""
+    # As duas implementações do .ics têm de dizer a mesma coisa, e a do
+    # aparelho passou a chamar o projeto quando não há unidade. "Sesc —" no
+    # LOCATION do compromisso não leva ninguém a lugar nenhum.
+    nome = ("Sesc " + uni) if uni and uni != "—" else (ev.get("projeto") or "Sesc São Paulo")
+    return esc_ics(nome + (" — " + end if end else ""))
 
 
 def _fim(ev, inicio):
@@ -344,7 +349,11 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  if (url.pathname.endsWith('eventos.json')) {
+  // A base e o arquivo magro das listas de contemplados: rede primeiro,
+  // cache como rede de segurança. O segundo é refeito de 20 em 20 minutos na
+  // tarde do sorteio — servi-lo do cache devolveria justamente a resposta
+  // velha que o botão "Consultar" existe para não dar.
+  if (url.pathname.endsWith('eventos.json') || url.pathname.endsWith('sorteados.json')) {
     e.respondWith(
       fetch(req)
         .then((r) => {
@@ -523,6 +532,46 @@ def main():
     # regrava o eventos.json com a marca icsd
     with open(os.path.join(args.saida, "dados", "eventos.json"), "w", encoding="utf-8") as f:
         json.dump(magro, f, ensure_ascii=False, separators=(",", ":"))
+
+    # O arquivo magro das listas de contemplados. É o que o botão "Consultar"
+    # busca: baixar 3,5 MB para conferir oito letras seria cobrar de quem usa
+    # o preço de um problema nosso. `sorteios.py` o refaz de 20 em 20 minutos
+    # na janela do sorteio; aqui ele é só copiado, e recriado a partir da base
+    # quando ainda não existe (primeira publicação, ou build sem a rodada
+    # leve). Sem ele o app cai de volta na base inteira, e não quebra.
+    fonte_sort = os.path.join(os.path.dirname(args.dados) or ".",
+                              "sorteados.json")
+    sorteados = None
+    if os.path.exists(fonte_sort):
+        # Truncado por uma escrita interrompida, ou sobra de um teste à mão:
+        # um `json.load` sem proteção aqui derrubaria a publicação inteira com
+        # traceback, quando a base ao lado tem tudo o que é preciso para
+        # refazer o arquivo. `sorteios.py` já protege a leitura equivalente.
+        try:
+            with open(fonte_sort, encoding="utf-8") as f:
+                sorteados = json.load(f)
+            if not isinstance(sorteados.get("sorteados"), dict):
+                raise ValueError("sem o mapa de sorteados")
+        except Exception as e:
+            print("%s ilegível (%s): refazendo a partir da base" % (fonte_sort, e))
+            sorteados = None
+    if sorteados is None:
+        # os dois lados: a lista sai depois de a inscrição fechar, e é
+        # justamente aí que o passeio sai da retenção e só existe no índice
+        todos = list(bruto["eventos"]) + list(bruto.get("sorteaveis") or [])
+        sorteados = {"geradoEm": bruto.get("geradoEm"),
+                     "sorteados": {str(e["id"]): e["sorteados"]
+                                   for e in todos if e.get("sorteados")}}
+    with open(os.path.join(args.saida, "dados", "sorteados.json"), "w",
+              encoding="utf-8") as f:
+        json.dump(sorteados, f, ensure_ascii=False, separators=(",", ":"))
+    # o carimbo também entra na base, para a primeira tela já dizer de quando
+    # é a conferência mesmo antes de o arquivo magro ser buscado (ou offline)
+    magro["sorteadosEm"] = sorteados.get("geradoEm")
+    with open(os.path.join(args.saida, "dados", "eventos.json"), "w", encoding="utf-8") as f:
+        json.dump(magro, f, ensure_ascii=False, separators=(",", ":"))
+    print("%d listas de contemplados em dados/sorteados.json"
+          % len(sorteados.get("sorteados") or {}))
 
     with open(os.path.join(args.saida, "manifest.webmanifest"), "w", encoding="utf-8") as f:
         f.write(manifest(base))

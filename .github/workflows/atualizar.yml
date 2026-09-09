@@ -1,10 +1,19 @@
 name: Atualizar programação
 
-# Roda de madrugada (05:10 no horário de Brasília = 08:10 UTC) e também sob
-# demanda, pelo botão "Run workflow" na aba Actions.
+# Roda de madrugada (05:10 em Brasília = 08:10 UTC) e de novo no fim da tarde
+# (17:10 em Brasília = 20:10 UTC), além de sob demanda pelo botão "Run
+# workflow" na aba Actions.
+#
+# A segunda rodada existe por causa dos sorteios. O Sesc publica a lista de
+# contemplados na página da atividade às 14h ou às 16h; com uma rodada só, de
+# madrugada, a lista NUNCA chegava no dia — quem tinha o código abria o app na
+# tarde do sorteio e lia que o resultado não havia saído, com a lista já na
+# tela do portal. Foi assim com "Jundiaí: os caminhos das águas" (resultado às
+# 14h de 09/09, coleta das 10h). A defasagem cai de um dia para algumas horas.
 on:
   schedule:
     - cron: "10 8 * * *"
+    - cron: "10 20 * * *"
   workflow_dispatch:
     inputs:
       dias:

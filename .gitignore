@@ -12,6 +12,10 @@ web.zip
 # link. Pesa alguns MB e muda a cada coleta — o fonte é o prototipo.html.
 previa.html
 
+# As listas de contemplados, refeitas pela rodada leve dos sorteios (a cada
+# 20 minutos na janela do sorteio). Saida gerada, como a base.
+dados/sorteados.json
+
 # A base coletada. Deixou de ser versionada: cada coleta acrescentava ~5 MB
 # pouco compressível, e o site sai do artefato da Action, não do repositório.
 # Para ter uma base local: python coletor.py --dias 60
@@ -26,3 +30,7 @@ painel.html
 
 # Export do GoatCounter, baixado a mao para alimentar o painel.
 GoatCounter/
+
+# capturas de tela do app (regeraveis com divulgacao/capturar.py)
+divulgacao/telas/_*.png
+divulgacao/__pycache__/

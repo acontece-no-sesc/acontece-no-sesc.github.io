@@ -1,0 +1,149 @@
+name: Listas de sorteio
+
+# De 20 em 20 minutos, das 13h às 20h de Brasília (16h–23h UTC).
+#
+# Por que separado da coleta grande: o Sesc publica os contemplados na página
+# da atividade às 14h ou às 16h, e o botão "Consultar" do app existe para dar
+# a resposta AGORA. Ele não consegue ler a página sozinho — o portal libera
+# CORS no /wp-json e recusa em todo o HTML (reconferido em 09/09/2026, no
+# Chrome, a partir do endereço de produção). Então quem lê é o robô, e o que
+# muda é a frequência.
+#
+# `sorteios.py` lê SÓ as páginas dos sorteios cuja divulgação é de hoje (ou
+# dos dois dias anteriores) e que ainda não têm lista: hoje são duas. Não é
+# uma segunda coleta — é o recorte mínimo. `detalhes.py --html` bateria em
+# 3 mil páginas, e a cada 20 minutos isso seria abuso de um portal que não é
+# nosso.
+on:
+  schedule:
+    - cron: "*/20 16-23 * * *"
+  workflow_dispatch:
+    inputs:
+      dias:
+        description: "Quantos dias para trás ainda entram na fila"
+        default: "2"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Nunca junto da coleta grande: as duas publicam no mesmo Pages, e a leve
+# reconstrói o site a partir da base em cache. Se elas se cruzarem, a leve
+# pode publicar em cima de uma coleta que ainda estava sendo escrita.
+concurrency:
+  group: atualizar
+  cancel-in-progress: false
+
+jobs:
+  sorteios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      novas: ${{ steps.ler.outputs.novas }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # SÓ restaura. Escrever o cache aqui deixaria a base enriquecida da
+      # madrugada sob uma chave nova a cada 20 minutos, e um dia em que esta
+      # rodada falhasse no meio publicaria uma base pela metade como se fosse
+      # a boa.
+      - name: Recuperar a base da coleta
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: dados/eventos.json
+          key: eventos-
+          restore-keys: |
+            eventos-
+
+      # Rede de segurança igual à da coleta grande: sem cache, a base de hoje
+      # ainda está publicada no próprio site. Sem base não há o que conferir,
+      # e a rodada termina sem publicar nada — melhor do que publicar um site
+      # construído a partir do nada.
+      - name: Sem cache, buscar a base publicada
+        id: base
+        env:
+          SITE: "https://acontece-no-sesc.github.io"
+        run: |
+          if [ -f dados/eventos.json ]; then
+            echo "Base veio do cache: $(du -h dados/eventos.json | cut -f1)"
+            echo "tem=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p dados
+          if curl -fsSL --max-time 120 "$SITE/dados/eventos.json" -o dados/eventos.json; then
+            echo "Base baixada do site publicado: $(du -h dados/eventos.json | cut -f1)"
+            echo "tem=1" >> "$GITHUB_OUTPUT"
+          else
+            rm -f dados/eventos.json
+            echo "::warning::Sem base (cache vazio e site indisponivel). Nada a conferir nesta rodada."
+            echo "tem=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      # O que já está no ar. A rodada leve não guarda estado, então é este
+      # arquivo que responde "falta alguma coisa lá fora?" — sem ele, as 21
+      # rodadas de uma tarde achariam a mesma lista e republicariam 21 vezes.
+      - name: Baixar o sorteados.json publicado
+        if: steps.base.outputs.tem == '1'
+        env:
+          SITE: "https://acontece-no-sesc.github.io"
+        run: |
+          if ! curl -fsSL --max-time 60 "$SITE/dados/sorteados.json" -o publicado.json; then
+            rm -f publicado.json
+            echo "::notice::Sem sorteados.json publicado ainda; esta rodada publica."
+          fi
+
+      - name: Ler as listas de contemplados do dia
+        if: steps.base.outputs.tem == '1'
+        id: ler
+        run: |
+          # O shell padrão do runner é `bash -e`, SEM pipefail: num cano quem
+          # decide o exit code é o `tee`. Sem esta linha, `sorteios.py` podia
+          # estourar no meio e o passo terminar verde, com `novas` vazio — e
+          # `novas` vazio é "não publica".
+          set -o pipefail
+          python sorteios.py --dias "${{ inputs.dias || '2' }}" --anterior publicado.json | tee saida.txt
+          novas=$(sed -n 's/^\([0-9]\+\) lista(s) nova(s).*/\1/p' saida.txt)
+          echo "novas=${novas:-0}" >> "$GITHUB_OUTPUT"
+
+      # O site só é refeito quando há lista nova. Numa tarde de sorteio são
+      # 21 rodadas e, na melhor das hipóteses, uma delas acha algo: republicar
+      # nas outras 20 seria gastar deploy do Pages para trocar um carimbo.
+      - name: Montar o arquivo único e o site
+        if: steps.ler.outputs.novas != '0'
+        env:
+          DOMINIO: ""
+        run: |
+          python embutir.py --com-descricao
+          repo="${GITHUB_REPOSITORY#*/}"
+          dono="${GITHUB_REPOSITORY_OWNER}"
+          if [ -n "$DOMINIO" ] || [ "${repo,,}" = "${dono,,}.github.io" ]; then
+            base="/"
+          else
+            base="/$repo/"
+          fi
+          python publicar.py --base "$base"
+          if [ -n "$DOMINIO" ]; then echo "$DOMINIO" > web/CNAME; fi
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.ler.outputs.novas != '0'
+        with:
+          path: web
+
+  # Sem lista nova não há artefato, e mandar o Pages publicar o vazio
+  # derrubaria o site que está no ar.
+  publicar:
+    needs: sorteios
+    if: needs.sorteios.outputs.novas != '0' && needs.sorteios.outputs.novas != ''
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

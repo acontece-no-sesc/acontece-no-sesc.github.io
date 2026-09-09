@@ -1295,7 +1295,14 @@
   var FONTE_JSON = "dados/eventos.json";
   var FONTE_DESC = "dados/desc/";     // um arquivo por evento
   var FONTE_ICS = "dados/ics/";       // .ics servido por URL real
+  /* As listas de contemplados, sozinhas — alguns KB contra 3,5 MB da base.
+     O botão "Consultar" existe para dar a resposta AGORA, e o robô refaz este
+     arquivo de 20 em 20 minutos na janela do sorteio. Baixar a base inteira
+     para conferir oito letras cobraria de quem usa o preço de um problema
+     nosso. */
+  var FONTE_SORTEADOS = "dados/sorteados.json";
   var origemDados = "embutido";
+  var SORTEADOS_EM = "";              // carimbo da última lista buscada
 
   /* A descrição não vem no pacote principal: são 2,5 mil textos que pesariam
      no download de todo mundo para serem lidos um de cada vez. Ela é buscada
@@ -1468,6 +1475,15 @@
     derivar();
     conferirTodos();      // a coleta nova pode ter trazido a lista do sorteio
     render();
+    // E, logo atrás, as listas de contemplados sozinhas: elas são refeitas de
+    // 20 em 20 minutos e a base, duas vezes por dia. Quem abre o app na tarde
+    // do sorteio tem a resposta sem apertar nada. Falha em silêncio — é um
+    // arquivo a mais, não uma dependência.
+    if (state.sorteios.length) {
+      buscarSorteados().then(function (n) {
+        if (n) { conferirTodos(); render(); }
+      }, function () {});
+    }
     return true;
   }
 
@@ -1737,6 +1753,16 @@
     return "";
   }
   function nomeReg(k) { for (var i = 0; i < REGIOES.length; i++) if (REGIOES[i].k === k) return REGIOES[i].nome; return k || "—"; }
+
+  /* Nem toda atividade acontece numa unidade. "Sesc na Bienal do Livro",
+     "Semana Move" e "Festival Sesc 80 Anos" chegam da fonte com
+     `unidade[0].name` nulo, e o coletor grava "—". "Sesc —" não é lugar
+     nenhum: quando não há unidade, quem localiza a pessoa é o projeto. */
+  function temUnidade(ev) { return !!(ev.uni && ev.uni !== "—"); }
+  function ondeDe(ev, curto) {
+    if (temUnidade(ev)) return (curto ? "" : "Sesc ") + ev.uni;
+    return ev.projeto || "Sesc São Paulo";
+  }
 
   var tT;
   function toast(m) { var t = $("#toast"); t.textContent = m; t.classList.add("on"); clearTimeout(tT); tT = setTimeout(function () { t.classList.remove("on"); }, 2800); }
@@ -2372,10 +2398,17 @@
     if (i.inscricao) {
       var est = estadoInscricao(ev);
       var f = fimInscricao(ev);
-      var ate = f ? " até " + curta(f.dia) + (f.presumido ? " (estimado)" : "") : "";
+      // A data e a ressalva andam JUNTAS, num lugar só. Enquanto cada ramo
+      // montava a sua, o "(estimado)" existia em "aberta" e faltava em
+      // "encerrada" — 350 eventos (12% da base) diziam "inscrição encerrada
+      // em 14 set" com a cara de fato sobre uma data que o app inventou
+      // (abertura + 3 dias), enquanto a mesma data, dois ramos acima, vinha
+      // com a ressalva. Quem lesse a linha desistia de um prazo que talvez
+      // nem tivesse vencido.
+      var marca = f ? curta(f.dia) + (f.presumido ? " (estimado)" : "") : "";
       if (est === "futura") return "inscrição abre " + dh(i.inscricao);
-      if (est === "aberta") return "inscrição aberta" + ate;
-      if (est === "encerrada") return "inscrição encerrada" + (f ? " em " + curta(f.dia) : "");
+      if (est === "aberta") return "inscrição aberta" + (marca ? " até " + marca : "");
+      if (est === "encerrada") return "inscrição encerrada" + (marca ? " em " + marca : "");
       return "inscrições a partir de " + dh(i.inscricao);
     }
     var v = vendaAbre(ev);
@@ -2507,7 +2540,7 @@
       if (pu) box.appendChild(etiqueta("t-publico", "publico", pu));
     }
     // na linha densa o "Sesc" é redundante — todas as atividades são do Sesc
-    if (!opc.semLocal) box.appendChild(etiqueta("t-local", "local", (opc.curto ? "" : "Sesc ") + ev.uni));
+    if (!opc.semLocal) box.appendChild(etiqueta("t-local", "local", ondeDe(ev, opc.curto)));
     return box;
   }
 
@@ -2670,7 +2703,7 @@
       var f = el("button", "seriefilho");
       f.type = "button";
       f.appendChild(el("span", "fh", horaBase(e, dia, modo) || "—"));
-      f.appendChild(el("span", "fu", "Sesc " + e.uni));
+      f.appendChild(el("span", "fu", ondeDe(e)));
       f.addEventListener("click", function () { abrirEvento(e, dia); });
       filhos.appendChild(f);
     });
@@ -3575,6 +3608,33 @@
     if (mudou) saveSorteios();
   }
 
+  /* A data do resultado já passou e a lista não veio na coleta.
+     A frase anterior dava a lista por não publicada, e isso o app não tem
+     como saber. A página do Sesc não abre para o navegador (não
+     manda CORS), então a única notícia que temos é a idade da nossa própria
+     coleta. Dizer "não saiu" quando o que houve foi "coletamos antes da hora"
+     manda embora quem veio buscar o resultado: foi o que aconteceu com o
+     sorteio de Jundiaí, publicado às 14h de um dia em que o robô rodou às
+     10h. Agora a frase diz de que horas é a coleta e aponta a página. */
+  function textoAtrasado(s) {
+    var ev = registroSorteio(s);
+    // `registroSorteio` devolve o evento CRU quando ele ainda está no
+    // catálogo (a hora mora em `inscricao.sorteio`) e a entrada já achatada
+    // quando veio do índice de sorteáveis (`sorteio` na raiz). Ler só uma
+    // das duas formas fazia a frase perder o horário justamente no caso que
+    // ela existe para explicar: coleta de manhã, resultado à tarde.
+    var i = (ev && ev.inscricao) || {};
+    var quando = (ev && ev.sorteio) || i.sorteio || s.divulga || "";
+    var c = olhadaBR();
+    var cedo = quando.length > 10 && c && c < quando;
+    return "O Sesc marcou o resultado para " + dh(quando) + ". A lista não estava lá na última conferência"
+      + (cedo ? ", de " + olhadaFmt() + " — anterior ao horário do sorteio"
+              : " de " + olhadaFmt())
+      + ". O robô olha de 20 em 20 minutos na tarde do sorteio; "
+      + "\"Consultar\" força a conferência agora, e \"Abrir página\" leva à "
+      + "página oficial.";
+  }
+
   function renderSorteios() {
     var box = $("#sortList"); box.innerHTML = "";
     var n = state.sorteios.length;
@@ -3609,7 +3669,7 @@
       var tg = el("div", "tags mini");
       tg.appendChild(el("span", "pill " + st.k, ROTULO[st.k]));
       if (ev) {
-        tg.appendChild(etiqueta("t-local", "local", ev.uni));
+        tg.appendChild(etiqueta("t-local", "local", ondeDe(ev, true)));
         if (s.divulga) tg.appendChild(etiqueta("t-prazo", null, "resultado " + curta(s.divulga)));
       }
       txt.appendChild(tg);
@@ -3626,7 +3686,7 @@
         : (s.divulga
             ? (HOJE < s.divulga
                 ? "Resultado previsto para " + curta(s.divulga) + ". O app confere sozinho assim que a lista sair."
-                : "A lista pública ainda não entrou na coleta. O app confere sozinho a cada abertura; se quiser, marque à mão abaixo.")
+                : textoAtrasado(s))
             : "Sem data de divulgação publicada. O app confere sozinho assim que a lista sair.")));
 
       var acts = el("div", "rowacts");
@@ -3689,9 +3749,44 @@
     abrirSheet();
   }
 
-  /* Consulta à mão: busca a coleta mais nova e reconfere na hora. O que
-     chega de novo é a lista pública de contemplados; a comparação continua
-     acontecendo dentro do aparelho. */
+  /** Busca só as listas de contemplados e as costura na base em memória.
+
+     Não dá para ler a página do sorteio daqui: o portal libera CORS no
+     `/wp-json` e recusa em todo o HTML (reconferido em 09/09/2026, no
+     Chrome, a partir do endereço de produção — a página do evento devolve
+     "Failed to fetch", a listagem devolve 200). Então quem lê a página é o
+     robô, de 20 em 20 minutos na janela do sorteio, e o que este arquivo faz
+     é chegar até aqui em alguns KB em vez de 3,5 MB.
+
+     O código digitado continua não saindo do aparelho: o que viaja é a lista
+     pública, e a comparação acontece aqui dentro. */
+  function buscarSorteados() {
+    return fetch(FONTE_SORTEADOS + "?t=" + Date.now(), { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (j) {
+        var mapa = (j && j.sorteados) || {};
+        var n = 0;
+        var costura = function (lista) {
+          (lista || []).forEach(function (e) {
+            var l = mapa[String(e.id)];
+            if (l && l.length) { e.sorteados = l; n++; }
+          });
+        };
+        costura(EVENTOS);
+        costura(DADOS.sorteaveis);
+        SORTEADOS_EM = (j && j.geradoEm) || "";
+        return n;
+      });
+  }
+
+  /* Consulta à mão: busca as listas mais novas e reconfere na hora.
+
+     A base inteira é o plano B, e não o A. Ela serve para o app publicado
+     antes deste arquivo existir — ali `sorteados.json` devolve 404, e cair
+     de volta na base é melhor do que dizer que não deu. */
   function consultarSorteio(s) {
     toast("Consultando a lista…");
     var fim = function () {
@@ -3700,9 +3795,35 @@
       var r = conferir(s);
       if (r.k === "win") toast("Sorteado! " + (r.hits.length === 1 ? "O código " + r.hits[0] + " está na lista." : r.hits.length + " códigos na lista."));
       else if (r.auto) toast("Seus códigos não estão na lista de contemplados.");
-      else toast("A lista deste sorteio ainda não foi publicada.");
+      // Nunca dizer "não foi publicada": o app não lê a página do Sesc, lê o
+      // que o robô leu. O que ele sabe é que a lista não estava lá na última
+      // olhada — e o toast diz de que horas foi essa olhada.
+      else toast("Ainda sem lista na conferência de " + olhadaFmt() + ".");
     };
-    buscarDados(false).then(fim, fim);
+    buscarSorteados().then(fim, function () { buscarDados(false).then(fim, fim); });
+  }
+
+  /** Quando as listas de contemplados foram olhadas pela última vez.
+
+     Não é a mesma coisa que a coleta: a base grande é de duas vezes por dia e
+     esta conferência é de 20 em 20 minutos na janela do sorteio. Dizer a hora
+     da coleta quando quem responde é a conferência envelheceria a resposta
+     em horas, no único assunto do app em que minutos importam. */
+  function olhadaBR() {
+    var q = SORTEADOS_EM || (DADOS.sorteadosEm || "");
+    if (!q) return coletaBR();
+    if (!TEM_FUSO.test(q)) return q.slice(0, 16);
+    var d = new Date(q);
+    if (isNaN(d.getTime())) return q.slice(0, 16);
+    var b = emBR(d);
+    return b.getFullYear() + "-" + p2(b.getMonth() + 1) + "-" + p2(b.getDate()) +
+           "T" + p2(b.getHours()) + ":" + p2(b.getMinutes());
+  }
+  function olhadaFmt() {
+    var c = olhadaBR();
+    if (!c) return "—";
+    var p = c.split("T");
+    return p[0].split("-").reverse().join("/") + (p[1] ? " às " + p[1] : "");
   }
 
   /* ---------------- detalhe ---------------- */
@@ -3714,7 +3835,7 @@
     var hora = quando ? horaNoDia(ev, quando) : "";
     var linhas = [ev.tit];
     if (quando) linhas.push(longa(quando) + (hora ? " às " + hora : ""));
-    linhas.push("Sesc " + ev.uni);
+    linhas.push(ondeDe(ev));
     var p = precoTxt(ev);
     if (p && p.t) linhas.push(p.t.charAt(0).toUpperCase() + p.t.slice(1));
     if (ev.link) linhas.push(ev.link);
@@ -4002,11 +4123,14 @@
           (prox.length || 0) > 5 ? "e mais " + (prox.length - 5) + " datas" : null);
       }
     }
-    fato("Onde", "Sesc " + ev.uni,
-      (enderecoDaUnidade(ev.uni) || ev.endereco || nomeReg(ev.reg)));
+    fato("Onde", ondeDe(ev),
+      (enderecoDaUnidade(ev.uni) || ev.endereco
+        || (temUnidade(ev) ? nomeReg(ev.reg) : "atividade fora de unidade · confira o endereço na página oficial")));
     fato("Público", publicosDe(ev).join(" · ") || "—",
       ev.classificacao ? "classificação " + ev.classificacao : null);
-    fato("Projeto", ev.projeto);
+    // Na atividade sem unidade o projeto JÁ é o "Onde"; repeti-lo logo abaixo
+    // faz a folha parecer que está gaguejando.
+    if (temUnidade(ev) || ev.projeto !== ondeDe(ev)) fato("Projeto", ev.projeto);
     b.appendChild(f);
 
     var acts = el("div", "acts");
@@ -4032,7 +4156,7 @@
     if (ev.geo || enderecoDaUnidade(ev.uni)) {
       var bm = el("a", "btn ghost", "Abrir no mapa");
       bm.href = "https://www.google.com/maps/search/?api=1&query=" +
-        encodeURIComponent(ev.geo ? ev.geo.join(",") : ("Sesc " + ev.uni + ", " + enderecoDaUnidade(ev.uni)));
+        encodeURIComponent(ev.geo ? ev.geo.join(",") : (ondeDe(ev) + ", " + enderecoDaUnidade(ev.uni)));
       bm.target = "_blank"; bm.rel = "noopener noreferrer";
       acts.appendChild(bm);
     }
@@ -5084,7 +5208,7 @@
   }
   function localDe(ev) {
     var end = enderecoDaUnidade(ev.uni) || ev.endereco || "";
-    return "Sesc " + ev.uni + (end ? " — " + end : "");
+    return ondeDe(ev) + (end ? " — " + end : "");
   }
 
   function somaMinutos(quando, min) {
