@@ -14,6 +14,7 @@ na rede, então serve para a CI.
     python teste_extratores.py
 """
 
+import io
 import json
 import os
 import shutil
@@ -31,6 +32,67 @@ def ler_fonte(nome):
     ninguém a chama. Esses só se pegam olhando o código que liga as peças."""
     with open(os.path.join(RAIZ, nome), encoding="utf-8") as f:
         return f.read()
+
+
+# A coleta aborta quando não vê nenhum Turismo Social (a categoria governa
+# três regras e sumir dela em silêncio já custou caro). Todo stub leva esta
+# atividade junto, para que a trava não mascare o que o teste quer medir.
+SENTINELA_TURISMO = {
+    "id": 999, "titulo": "Passeio", "unidade": [{"name": "Pompeia"}],
+    "dataPrimeiraSessao": "2026-09-15T09:00",
+    "dataUltimaSessao": "2026-09-15T12:00",
+}
+
+
+def so(lista, titulo):
+    """O evento de um título, na lista que a coleta devolveu."""
+    achados = [e for e in lista if e["tit"] == titulo]
+    assert len(achados) == 1, "%r apareceu %d vezes" % (titulo, len(achados))
+    return achados[0]
+
+
+def coletar_com_stub(atividade, espera_saida=None):
+    """Roda `coletor.coletar` sobre UMA atividade, sem tocar na rede.
+
+    A varredura de segurança e as travas moram dentro de `coletar`; testá-las
+    de fora exigiria rede, e testá-las por leitura de fonte não pega fiação
+    trocada. O stub devolve a atividade só na varredura geral — é lá que os
+    dois defeitos de janela e de região aconteciam.
+    """
+    import contextlib
+    import coletor
+    from datetime import date
+
+    estado = {"geral": 0}
+
+    def falso_buscar(url, tentativa=1):
+        if "unidades-atividades" in url:
+            return [{"name": "Pompeia", "description": "Capital"}]
+        if "data_inicial" in url:
+            return {"atividade": [], "total": {"value": 0}}
+        estado["geral"] += 1
+        if estado["geral"] > 1:
+            return {"atividade": [], "total": {"value": 0}}
+        import copy
+        sentinela = copy.deepcopy(SENTINELA_TURISMO)
+        sentinela["tipos_linguagens"] = [{"titulo": coletor.CAT_TURISMO}]
+        return {"atividade": [atividade, sentinela], "total": {"value": 2}}
+
+    original, pausa = coletor.buscar, coletor.PAUSA
+    coletor.buscar, coletor.PAUSA = falso_buscar, 0
+    quieto = contextlib.redirect_stdout(io.StringIO())
+    try:
+        if espera_saida is not None:
+            with espera_saida.assertRaises(SystemExit) as ctx, quieto:
+                coletor.coletar(date(2026, 9, 9), date(2026, 11, 7),
+                                set(coletor.REGIOES_VALIDAS))
+            return str(ctx.exception)
+        with quieto:
+            lista, _ = coletor.coletar(date(2026, 9, 9), date(2026, 11, 7),
+                                       set(coletor.REGIOES_VALIDAS))
+        return lista
+    finally:
+        coletor.buscar, coletor.PAUSA = original, pausa
 
 
 class DatasDeInscricao(unittest.TestCase):
@@ -177,6 +239,51 @@ class ListaDeContemplados(unittest.TestCase):
             "Compartilhe: CONTEMPLADOS YDYNALVB WDSOMKPL QRTZAABC MNOPQRST")
         self.assertTrue(achado, "cabeçalho seco não foi reconhecido")
         self.assertIn("YDYNALVB", achado)
+
+
+class EnfeiteAntesDaLista(unittest.TestCase):
+    """"Resultado do sorteio (em ordem alfabética): DOKFCHWU…"
+
+    O parêntese põe três tokens de enfeite entre o cabeçalho e o primeiro
+    código, e a trava contra prosa (que desiste no terceiro token sem código)
+    desistia justamente ali. Eram 3 dos 13 sorteios já vencidos em 09/09 —
+    28, 14 e 13 códigos publicados na página — que o app dava como pendentes,
+    e continuaria dando para sempre, porque a página não muda mais.
+    """
+
+    def test_parentese_entre_o_cabecalho_e_a_lista(self):
+        texto = ("Resultado do sorteio (em ordem alfabética): DOKFCHWU "
+                 "EKEFDFKT ENKSPZXC IBLYRDPZ Havendo necessidade operacional")
+        self.assertEqual(detalhes.sorteados_do_corpo(texto),
+                         ["DOKFCHWU", "EKEFDFKT", "ENKSPZXC", "IBLYRDPZ"])
+
+    def test_a_trava_contra_prosa_continua_de_pe(self):
+        """Alargar a janela de tokens teria trazido o falso positivo de volta.
+
+        Descartar o PARÊNTESE é seguro porque prosa não começa com "(".
+        Descartar "os primeiros N tokens" não seria: bastariam duas palavras
+        em caixa alta para uma frase virar lista de contemplados.
+        """
+        self.assertEqual(detalhes.sorteados_do_corpo(
+            "Resultado do sorteio: os sorteados poderão efetivar o pagamento"), [])
+        self.assertEqual(detalhes.sorteados_do_corpo(
+            "Resultado do sorteio será divulgado na CENTRAL DE ATENDIMENTO"), [])
+
+    def test_o_enfeite_descartado_e_curto(self):
+        """Um "(" solto no meio da página não pode comer o que vem depois.
+
+        Por isso o parêntese só é descartado até 60 caracteres: sem esse
+        limite, um parêntese longo — ou um "(" sem fechamento por perto —
+        engoliria a lista inteira junto.
+        """
+        self.assertIsNone(detalhes.RE_ENFEITE.match("(" + "x" * 200 + ") ABCDEFGH"))
+        self.assertIsNotNone(
+            detalhes.RE_ENFEITE.match(" (em ordem alfabética): ABCDEFGH"))
+
+    def test_lista_sem_enfeite_continua_igual(self):
+        self.assertEqual(detalhes.sorteados_do_corpo(
+            "Resultado do sorteio: YVOPXAGP UDESMROF fim"),
+            ["YVOPXAGP", "UDESMROF"])
 
 
 class LimpezaDeTexto(unittest.TestCase):
@@ -344,25 +451,279 @@ class CategoriaComNomeUnico(unittest.TestCase):
                                  "coletor.CAT_TURISMO" % nome)
 
 
-class TravaDeRegiao(unittest.TestCase):
-    """`normalizar` põe "outra" em unidade que não bate exatamente.
+class NomeDaUnidade(unittest.TestCase):
+    """O nome da unidade é a única chave entre a atividade e a região.
 
-    Basta o portal renomear uma unidade, ou trocar o vocabulário de
-    `description`, para o filtro de região virar exclusão em massa — com
-    uma linha informativa de log como único sinal.
+    O portal não o escreve igual nos dois endpoints: a listagem manda
+    "São Caetano " com um espaço sobrando e /unidades-atividades manda
+    "São Caetano". Vinte e sete atividades ficaram sem região por causa
+    disso — e sem região o coletor as descartava.
     """
 
-    def test_coletor_trava_exclusao_em_massa(self):
+    def test_espaco_sobrando_ainda_casa(self):
+        import coletor
+        ev = coletor.normalizar(
+            {"id": 1, "titulo": "x", "unidade": [{"name": "São Caetano "}]},
+            {"São Caetano": "capital"})
+        self.assertEqual(ev["uni"], "São Caetano")
+        self.assertEqual(ev["reg"], "capital")
+
+    def test_atividade_sem_unidade_nao_inventa_nome(self):
+        import coletor
+        ev = coletor.normalizar(
+            {"id": 1, "titulo": "x", "unidade": [{"name": None}]}, {})
+        self.assertEqual(ev["uni"], "—")
+        self.assertEqual(ev["reg"], "outra")
+
+    def test_os_dois_lados_usam_a_mesma_normalizacao(self):
+        """Normalizar um lado só não resolve: as chaves têm de coincidir."""
         fonte = ler_fonte("coletor.py")
-        i_filtro = fonte.index('lista = [e for e in lista if e["reg"] in regioes]')
-        trecho = fonte[i_filtro:i_filtro + 1400]
-        self.assertIn("fora > antes * 0.1", trecho,
-                      "o filtro de região descarta em massa sem travar")
+        self.assertIn('nome = chave_unidade(u.get("name"))', fonte)
+        self.assertIn('uni = chave_unidade(primeiro(a.get("unidade")))', fonte)
+
+
+class TravaDeRegiao(unittest.TestCase):
+    """O filtro de região servia para pedir menos e virou descarte.
+
+    `reg` também vale "outra" — em unidade renomeada e na programação que
+    acontece FORA de uma unidade, que a fonte manda com `name` nulo. Como
+    "outra" não está entre as três regiões válidas, pedir "todas" apagava
+    81 atividades: 27 pelo espaço sobrando em "São Caetano " e 54 sem
+    unidade nenhuma, entre elas os 39 eventos do Sesc na Bienal do Livro.
+    A trava de 10% não viu nada: era 2,5% do total.
+    """
+
+    def test_pedir_todas_as_regioes_nao_descarta(self):
+        fonte = ler_fonte("coletor.py")
+        self.assertIn("if regioes and set(regioes) < set(REGIOES_VALIDAS):", fonte,
+                      "o filtro só pode valer quando se pede um subconjunto")
+
+    def test_trava_mede_unidade_orfa_e_nao_o_saldo_do_filtro(self):
+        fonte = ler_fonte("coletor.py")
+        trecho = fonte[fonte.index("orfas = sorted("):][:1600]
+        self.assertIn('e["uni"] != "—" and e["uni"] not in unidades', trecho,
+                      "a trava tem de medir nome que não existe no mapa, que é "
+                      "o sintoma de unidade renomeada")
         self.assertIn('if not any(e["cat"] == CAT_TURISMO for e in lista)', trecho,
                       "sem conferir a categoria, renomeá-la apaga três regras "
                       "de uma vez, todas em silêncio")
         self.assertEqual(trecho.count("ABORTADO"), 2,
                          "as duas travas precisam abortar, não avisar")
+
+    def test_unidade_orfa_aborta_a_coleta(self):
+        import coletor
+        lista = coletar_com_stub(
+            {"id": 7, "titulo": "Show", "unidade": [{"name": "Pompéia Nova"}],
+             "dataPrimeiraSessao": "2026-09-10T20:00",
+             "dataUltimaSessao": "2026-09-10T21:00",
+             "tipos_linguagens": [{"titulo": "Cinema"}]},
+            espera_saida=self)
+        self.assertIn("Pompéia Nova", lista)
+
+    def test_atividade_sem_unidade_sobrevive_a_coleta(self):
+        import coletor
+        lista = coletar_com_stub(
+            {"id": 7, "titulo": "Slam da Guilhermina", "unidade": [{"name": None}],
+             "conjunto": [{"name": "Sesc na Bienal do Livro"}],
+             "dataPrimeiraSessao": "2026-09-11T15:00",
+             "dataUltimaSessao": "2026-09-11T16:00",
+             "tipos_linguagens": [{"titulo": "Cinema"}]})
+        slam = so(lista, "Slam da Guilhermina")
+        self.assertEqual(slam["reg"], "outra")
+        self.assertEqual(slam["uni"], "—")
+
+
+class TemporadaQueAtravessaAJanela(unittest.TestCase):
+    """A varredura de segurança só guarda as duas pontas do intervalo.
+
+    Quando as duas caem fora da janela — "Curumim 2026" vai de fevereiro a
+    dezembro — a lista de dias saía vazia e o programa sumia do app. Eram
+    23 programas contínuos, de esporte e de criança, que acontecem toda
+    semana e nunca apareceram.
+    """
+
+    def um(self, ini, fim):
+        # categoria comum de propósito: viagem é contínua e teria os dias
+        # preenchidos por `expandir_viagens`, o que esconderia o grampo
+        return so(coletar_com_stub(
+            {"id": 7, "titulo": "Curumim", "unidade": [{"name": "Pompeia"}],
+             "dataPrimeiraSessao": ini + "T09:00",
+             "dataUltimaSessao": fim + "T18:00",
+             "tipos_linguagens": [{"titulo": "Esporte e Atividade Física"}]}),
+            "Curumim")
+
+    def test_temporada_de_um_ano_nao_some(self):
+        ev = self.um("2026-02-10", "2026-12-18")
+        self.assertEqual(ev["dias"], ["2026-09-09", "2026-11-07"])
+        self.assertTrue(ev["parcial"],
+                        "a lista de dias está incompleta e a tela precisa avisar")
+
+    def test_ponta_de_fora_e_grampeada_na_janela(self):
+        self.assertEqual(self.um("2026-08-01", "2026-09-20")["dias"],
+                         ["2026-09-09", "2026-09-20"])
+
+
+class PasseioSemDataDeInscricao(unittest.TestCase):
+    """A retenção pedia DATA de inscrição a todo Turismo Social.
+
+    Passeio que não tem inscrição nenhuma — "Atividade aberta, sem retirada
+    de ingressos", "Acesso livre", "Senhas na Loja Sesc com 30 minutos de
+    antecedência" — não tem o que datar, e sumia. Eram 20, entre eles os
+    três "Outras viagens" de Campinas. O que não dá para mostrar é o
+    passeio de que não se sabe COMO ENTRAR: nem data, nem texto.
+    """
+
+    HOJE = "2026-09-09"
+    HOR = "2026-11-08"
+
+    def passeio(self, inscricao):
+        import coletor
+        return {"cat": coletor.CAT_TURISMO, "dias": ["2026-09-20"],
+                "inscricao": inscricao}
+
+    def fica(self, inscricao):
+        import regras
+        return regras.manter(self.passeio(inscricao), self.HOJE, self.HOR)
+
+    def test_atividade_aberta_fica(self):
+        self.assertTrue(self.fica(
+            {"texto": "Atividade aberta, sem retirada de ingressos, mediante "
+                      "capacidade do local.", "temSorteio": False}))
+
+    def test_senha_no_local_fica(self):
+        self.assertTrue(self.fica(
+            {"texto": "30 vagas. Senhas na Loja Sesc com 30 minutos de "
+                      "antecedência."}))
+
+    def test_regra_recorrente_sem_data_fica(self):
+        self.assertTrue(self.fica(
+            {"regras": [{"quem": "geral", "semanas": [1], "dow": 3,
+                         "hora": "14:00"}]}))
+
+    def test_sem_data_e_sem_texto_sai(self):
+        self.assertFalse(self.fica({}))
+        self.assertFalse(self.fica({"texto": "  "}))
+
+    def test_a_regra_nao_volta_a_pedir_data(self):
+        fonte = ler_fonte("regras.py")
+        self.assertNotIn('SO_COM_INSCRICAO and not i.get("inscricao")', fonte,
+                         "exigir data apaga o passeio que não tem inscrição")
+
+
+class RodadaLeveDeSorteio(unittest.TestCase):
+    """`sorteios.py` — a fila mínima e a decisão de republicar.
+
+    O botão "Consultar" existe para dar a resposta agora, e o navegador não
+    lê a página da atividade (o portal libera CORS no /wp-json e recusa em
+    todo o HTML). Quem lê é o robô, de 20 em 20 minutos na tarde do sorteio,
+    e o que importa é ele bater no portal o mínimo possível e republicar o
+    site só quando há o que publicar.
+    """
+
+    HOJE = "2026-09-09"
+
+    def passeio(self, quando, sorteados=None, link="https://x/y"):
+        ev = {"id": 1, "tit": "Passeio", "link": link,
+              "inscricao": {"sorteio": quando} if quando else {}}
+        if sorteados:
+            ev["sorteados"] = sorteados
+        return ev
+
+    def fila(self, eventos, dias=2):
+        import sorteios
+        return sorteios.pendentes(eventos, self.HOJE, dias)
+
+    def test_so_entra_quem_esta_na_janela(self):
+        dentro = self.passeio("2026-09-09T14:00")
+        borda = self.passeio("2026-09-07")
+        velho = self.passeio("2026-09-06")
+        futuro = self.passeio("2026-09-11")
+        fila = self.fila([dentro, borda, velho, futuro])
+        self.assertEqual(len(fila), 2)
+        self.assertNotIn(velho, fila)
+        self.assertNotIn(futuro, fila,
+                         "sorteio que ainda não aconteceu não tem lista para ler")
+
+    def test_quem_ja_tem_lista_nao_volta_a_fila(self):
+        """A lista publicada não muda; reler é bater no portal à toa."""
+        self.assertEqual(
+            self.fila([self.passeio("2026-09-09", sorteados=["ABCDEFGH"])]), [])
+
+    def test_sem_data_ou_sem_link_fica_de_fora(self):
+        self.assertEqual(self.fila([self.passeio(None)]), [])
+        self.assertEqual(self.fila([self.passeio("2026-09-09", link=None)]), [])
+
+    def test_o_de_hoje_vem_primeiro(self):
+        """Alguém está esperando ESTE neste minuto; o teto corta o resto."""
+        fila = self.fila([self.passeio("2026-09-07"),
+                          self.passeio("2026-09-09T14:00")])
+        self.assertEqual(fila[0]["inscricao"]["sorteio"], "2026-09-09T14:00")
+
+    def test_republica_so_o_que_o_site_ainda_nao_tem(self):
+        import sorteios
+        anterior = os.path.join(tempfile.mkdtemp(), "publicado.json")
+        with open(anterior, "w", encoding="utf-8") as f:
+            json.dump({"sorteados": {"1": ["AAAAAAAA"]}}, f)
+        self.assertEqual(sorteios.novidades({"1": ["AAAAAAAA"]}, anterior), 0,
+                         "republicar sem lista nova gasta deploy do Pages "
+                         "para trocar um carimbo")
+        self.assertEqual(sorteios.novidades(
+            {"1": ["AAAAAAAA"], "2": ["BBBBBBBB"]}, anterior), 1)
+
+    def test_sem_arquivo_anterior_publica_por_precaucao(self):
+        """Errar publicando é barato; errar calado guarda a lista mais um dia."""
+        import sorteios
+        self.assertIsNone(sorteios.novidades({"1": ["A"]}, None))
+        self.assertIsNone(sorteios.novidades({"1": ["A"]}, "nao/existe.json"))
+
+    def test_o_que_ja_esta_publicado_nao_e_relido(self):
+        """A rodada leve não guarda estado, e relia a mesma página o dia todo.
+
+        Ela só restaura o cache e nunca o salva — salvar deixaria uma base
+        pela metade sob a chave que a coleta grande restaura de madrugada.
+        Então toda execução partia da base da madrugada: uma lista achada às
+        14h20 voltava para a fila às 14h40, às 15h, às 15h20. Vinte
+        releituras da mesma página, num portal que não é nosso.
+        """
+        import sorteios
+        pasta = tempfile.mkdtemp()
+        publicado = os.path.join(pasta, "publicado.json")
+        with open(publicado, "w", encoding="utf-8") as f:
+            json.dump({"sorteados": {"1": ["YVOPXAGP", "UDESMROF"]}}, f)
+
+        ev = self.passeio("2026-09-09T14:00")
+        self.assertEqual(sorteios.semear([ev], publicado), 1)
+        self.assertEqual(ev["sorteados"], ["YVOPXAGP", "UDESMROF"])
+        self.assertEqual(self.fila([ev]), [],
+                         "com a lista já publicada não há o que reler")
+
+    def test_semear_sobrevive_a_arquivo_ruim(self):
+        import sorteios
+        ruim = os.path.join(tempfile.mkdtemp(), "meio.json")
+        with open(ruim, "w", encoding="utf-8") as f:
+            f.write('{"sorteados": {"1": ["AAAA')
+        ev = self.passeio("2026-09-09")
+        self.assertEqual(sorteios.semear([ev], ruim), 0)
+        self.assertNotIn("sorteados", ev,
+                         "arquivo pela metade não pode virar lista pela metade")
+        self.assertEqual(sorteios.semear([ev], None), 0)
+
+    def test_semear_nao_sobrescreve_o_que_a_base_ja_tem(self):
+        import sorteios
+        publicado = os.path.join(tempfile.mkdtemp(), "p.json")
+        with open(publicado, "w", encoding="utf-8") as f:
+            json.dump({"sorteados": {"1": ["VELHOAAA"]}}, f)
+        ev = self.passeio("2026-09-09", sorteados=["NOVOBBBB"])
+        sorteios.semear([ev], publicado)
+        self.assertEqual(ev["sorteados"], ["NOVOBBBB"],
+                         "a base enriquecida é mais nova que o publicado")
+
+    def test_o_extrator_e_o_mesmo_de_detalhes(self):
+        """Duas cópias da regra dos quatro cabeçalhos, e uma envelhece."""
+        fonte = ler_fonte("sorteios.py")
+        self.assertIn("detalhes.sorteados_do_corpo", fonte)
+        self.assertNotIn("re.compile", fonte,
+                         "a regra de extração mora em detalhes.py")
 
 
 if __name__ == "__main__":

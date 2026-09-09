@@ -1,5 +1,7 @@
 # Acontece no SESC — agregador não oficial
 
+**No ar: https://acontece-no-sesc.github.io/**
+
 Reúne a programação do Sesc São Paulo (capital, interior e litoral) num app de
 celular instalável, com destaques, agenda, favoritos e acompanhamento de
 sorteios.
@@ -15,7 +17,9 @@ oficial, que é sempre a fonte da verdade.
 coletor.py  ──►  dados/eventos.json  ──►  publicar.py  ──►  web/  ──►  GitHub Pages
 detalhes.py ──►         ▲                                    │
 reparse.py  ────────────┘                                    └──► o app busca o JSON
-                                                                  a cada abertura
+sorteios.py ────────────┘                                         a cada abertura
+     └──►  dados/sorteados.json  ──────────────────────────►  e a lista de sorteio
+                                                              a cada "Consultar"
 ```
 
 O app é um arquivo HTML só. Ele carrega com um instantâneo embutido (abre
@@ -45,10 +49,17 @@ aberturas de venda on-line e presencial.
 3. Rode uma vez à mão: aba **Actions → Atualizar programação → Run workflow**.
 
 Pronto — o endereço sai como `https://SEU-USUARIO.github.io/NOME-DO-REPO/`.
-Desse ponto em diante o robô roda todo dia às 5h10 e republica sozinho.
+Desse ponto em diante o robô republica sozinho: a coleta completa às 5h10 e às
+17h10, e uma rodada leve de 20 em 20 minutos, das 13h às 20h, que lê só as
+páginas dos sorteios do dia. Essa segunda existe porque o Sesc publica os
+contemplados às 14h ou 16h — com uma coleta só, de madrugada, o resultado
+nunca chegava no dia.
 
 O `--base` do `publicar.py` precisa bater com a subpasta do Pages; o workflow
 já preenche isso com o nome do repositório.
+
+Aqui o site é a página da organização (`acontece-no-sesc.github.io`), servida
+na **raiz** — então `--base /`, sem subpasta.
 
 ### Compartilhar
 
@@ -85,6 +96,7 @@ Do celular, na mesma Wi-Fi: `http://SEU-IP:8000`
 |---|---|
 | `coletor.py` | Consulta dia a dia (única forma de saber em que dias cada atividade acontece) e grava `dados/eventos.json` |
 | `detalhes.py` | Segunda passada: bilheteria (JSON) e página (HTML) para preço, venda, inscrição e códigos sorteados |
+| `sorteios.py` | Rodada leve: só as páginas dos sorteios do dia, e grava `dados/sorteados.json` (alguns KB) |
 | `reparse.py` | Reaplica o extrator de datas sobre o texto já guardado, sem rede |
 | `embutir.py` | Injeta os dados no `prototipo.html` (arquivo único) |
 | `publicar.py` | Monta `web/` com manifest, service worker e ícones |

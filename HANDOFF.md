@@ -5,8 +5,8 @@ decisões, as descobertas sobre a fonte de dados e as armadilhas já resolvidas,
 para não serem reintroduzidas.
 
 **Pasta do projeto:** `C:\Users\leand\SESC`
-**Prévia publicada:** https://claude.ai/code/artifact/10190c1d-a88a-4f8e-a237-2bdb49e16ef6
-**Estado:** 9 commits locais, repositório pronto para `git push`. Falta só publicar.
+**No ar:** https://acontece-no-sesc.github.io/ — é este o endereço a divulgar.
+**Prévia congelada (não é o PWA):** https://claude.ai/code/artifact/10190c1d-a88a-4f8e-a237-2bdb49e16ef6
 
 ---
 
@@ -136,6 +136,7 @@ Cada uma custou uma rodada de depuração. **Não reintroduzir.**
 | Correção de ano comparava com o **início** do evento — temporada longa jogava a inscrição para o ano anterior | Compara com o **fim**, e só com folga > 60 dias |
 | Rótulo "INSCRIÇÕES" era engolido pelo próprio regex, texto começava em ":" | Captura inclui o rótulo |
 | "Divulgação dos sorteados" / "Sorteio e divulgação ... em 25/06" não reconhecidos | Padrões adicionais sem dois-pontos |
+| "Resultado do sorteio **(em ordem alfabética):**" — o parêntese punha 3 tokens entre o cabeçalho e o 1º código, e a trava contra prosa desistia no 3º | `RE_ENFEITE` descarta o parêntese (até 60 caracteres) antes da contagem. Só o parêntese: alargar a janela de tokens traria de volta o falso positivo |
 
 ---
 
@@ -150,8 +151,10 @@ passeio de novembro abre em agosto. Fica no app quem satisfaz uma destas:
 2. inscrição ou venda **está aberta** agora;
 3. acontece em 60 dias e **nada indica** que a entrada fechou.
 
-Mais: **Turismo Social sem data de inscrição sai** (ou já passou da fase, ou não
-dá para saber como entrar).
+Mais: **sai o Turismo Social de que não se sabe como entrar** — sem data de
+inscrição, sem texto e sem regra recorrente. Exigir *data* era o corte
+anterior, e ele apagava o passeio que simplesmente não tem inscrição (ver
+6.4).
 
 **Esgotado e prazo vencido não excluem mais.** Os dois eram tratados como
 "barreira fechada" e tiravam o evento da base inteira — 41 esgotados e 306
@@ -295,6 +298,7 @@ quem estivesse fora do fuso via a agenda virar o dia na hora errada.
 ```
 coletor.py   → dados/eventos.json          (listagem, dia a dia + varredura)
 detalhes.py  → enriquece o mesmo arquivo   (bilheteria + HTML)
+sorteios.py  → dados/sorteados.json        (só as listas do dia, de 20 em 20 min)
 extras.py    → acrescenta foto e endereço  (backfill; o coletor já grava)
 reparse.py   → reprocessa sem rede         (usa o texto já guardado)
 embutir.py   → prototipo.html              (arquivo único, prévia por link)
@@ -310,6 +314,12 @@ grava) mas continua sendo quem traz os endereços.
 `reparse.py` é importante: `detalhes.py` guarda o texto bruto em
 `inscricao.texto`, então melhorias no extrator se aplicam em segundos, sem
 rebaixar milhares de páginas.
+
+`sorteios.py` é o recorte mínimo de `detalhes.py`: lê **só** as páginas dos
+sorteios cuja divulgação é de hoje (ou dos dois dias anteriores) e que ainda
+não têm lista — hoje são duas. Reusa `detalhes.sorteados_do_corpo`, porque
+duas cópias da regra dos quatro cabeçalhos garantiriam que uma envelhecesse.
+Roda de 20 em 20 minutos das 13h às 20h (ver 5.2.3).
 
 ### 5.1 Duas saídas, um código
 
@@ -340,11 +350,19 @@ Consequências diretas:
   que o app mostra. Não é a base inteira — 1.644 eventos seriam doze páginas
   de 300 por abertura, e o portal não é nosso. Confere **hoje, amanhã e as
   próximas datas dos favoritos**, no máximo seis dias, e falha em silêncio.
-- **Resultado de sorteio não dá para consultar na hora.** Os códigos dos
+- **Resultado de sorteio não dá para ler da página, na hora.** Os códigos dos
   contemplados estão no HTML da página da atividade, que é justamente o que o
-  portal bloqueia. A automação possível é a que está no ar: o robô lê a lista
-  todo dia e grava em `sorteados`; o app confere a cada abertura, dentro do
-  aparelho. A defasagem máxima é de um dia.
+  portal bloqueia.
+
+  **Reconferido em 09/09/2026**, porque valia duvidar: no Chrome de verdade, a
+  partir de `https://acontece-no-sesc.github.io`, `/wp-json/...` devolve 200
+  legível e **toda** página HTML de `www.sescsp.org.br` devolve `Failed to
+  fetch` — a do evento, a de unidade e a raiz. Curioso, e não muda nada: o
+  `curl` recebe `Access-Control-Allow-Origin: *` nessa mesma página; o
+  navegador, não. O que vale é o navegador.
+
+  Então a automação possível é a que está no ar, e o que dá para mexer é a
+  **frequência** — ver 5.2.3.
 
 ### 5.2.2 O cache do service worker é o resumo da casca
 
@@ -354,6 +372,45 @@ worker seguia servindo o `index.html` antigo e quem já tinha instalado nunca
 via a mudança. O sintoma era sempre o mesmo — "mexi no CSS e a tela não
 mudou". Agora é o **sha1 do `index.html` publicado**: mudou o app, muda o
 cache.
+
+### 5.2.3 O botão "Consultar" e o arquivo magro
+
+"Consultar" existe para dar a resposta **agora** — é a função dele, e ele não
+a cumpria: buscava a base inteira, que era de madrugada, e o Sesc publica os
+contemplados às 14h ou às 16h. Ler a página no toque é impossível (5.2.1). O
+que sobra é encurtar a distância entre o portal publicar e o app saber.
+
+Duas peças:
+
+1. **`sorteios.py`, de 20 em 20 minutos**, das 13h às 20h de Brasília
+   (`.github/workflows/sorteios.yml`). Lê só as páginas dos sorteios do dia —
+   hoje, duas. Não é uma segunda coleta: `detalhes.py --html` bateria em 3 mil
+   páginas, e a cada 20 minutos isso seria abuso de um portal que não é nosso.
+
+2. **`dados/sorteados.json`**, de alguns KB, só `{id: [códigos]}`. É o que o
+   app busca ao abrir e ao tocar em "Consultar". Baixar 3,5 MB para conferir
+   oito letras cobraria de quem usa o preço de um problema nosso. A base
+   inteira continua sendo o plano B, para quem tem instalado um app anterior a
+   este arquivo — ali o `404` cai de volta na base e nada quebra.
+
+A defasagem cai de **um dia para vinte minutos**. Medido no caso que originou
+tudo: "Jundiaí: os caminhos das águas" publicou 13 contemplados às 14h; com a
+rodada leve, o app os teria por volta das 14h20.
+
+Duas travas que o desenho exige:
+
+- **A rodada leve não escreve o cache.** Se escrevesse, um dia em que ela
+  falhasse no meio deixaria uma base pela metade sob a chave que a coleta
+  grande restaura na madrugada seguinte.
+- **Republicar só quando há lista nova**, e "nova" é medida contra o
+  `sorteados.json` que **está no ar**, não contra o que a passada leu. A
+  rodada não guarda estado: sem essa comparação, as 21 rodadas de uma tarde
+  achariam a mesma lista e republicariam o site 21 vezes.
+
+O carimbo da conferência é **separado** do carimbo da coleta (`olhadaFmt()` no
+app, `sorteadosEm` na base). Misturá-los faria a tela dizer "coleta das 5h10"
+numa informação de vinte minutos atrás — envelhecendo a resposta em horas, no
+único assunto do app em que minutos importam.
 
 ### 5.3 Calendário
 
@@ -405,7 +462,147 @@ faz o que diz. No computador sobra um botão **ao lado** — não no lugar — p
 o Google Agenda, porque lá o `.ics` cai na pasta de downloads e parece que
 nada aconteceu.
 
-## 6. Estado atual e pendências
+## 6. A varredura de 09/09/2026 — 134 eventos que não chegavam à tela
+
+Dois relatos de quem usa ("o sorteio saiu e o app diz que não" e "este evento
+não aparece") viraram uma conferência do catálogo inteiro: a listagem do
+portal, sem filtro de data, contra o que o site publicado mostrava. Deu **146
+atividades no portal e fora do app**; 12 estavam legitimamente fora (7 além da
+janela de 60 dias, 5 canceladas) e **134 eram perda**, por quatro causas
+diferentes — nenhuma delas com teste, nenhuma delas visível no log.
+
+O método vale mais que os números: **o app não sabe o que não coletou**. Todo
+descarte silencioso desta lista passou por uma linha de log tranquila ou por
+uma trava que mediu a coisa errada. A conferência contra a fonte é a única que
+enxerga esse tipo de buraco, e sai barata — a varredura geral são 11 páginas.
+
+### 6.1 "São Caetano " com um espaço sobrando — 27 eventos
+
+O nome da unidade é a **única** chave entre a atividade e a região, e o portal
+não o escreve igual nos dois endpoints: `/atividades/filter` manda
+`"São Caetano "` e `/unidades-atividades` manda `"São Caetano"`. Sem casar,
+`normalizar` marcava região `"outra"`, e `"outra"` era descarte.
+
+`coletor.chave_unidade` normaliza os **dois** lados. Normalizar um só não
+adianta: o que precisa coincidir são as chaves.
+
+### 6.2 Atividade sem unidade nenhuma — 54 eventos
+
+`unidade[0].name` vem `null` na programação que acontece **fora** de uma
+unidade. Só o **Sesc na Bienal do Livro** eram 39 eventos gratuitos daquela
+semana; havia ainda Semana Move, Festival Sesc 80 Anos e Sesc Galeria.
+
+A causa era o filtro de região. Ele existe para **pedir menos** ("só a
+capital"), mas rodava sempre — e como `reg` também vale `"outra"`, pedir as
+três regiões apagava tudo o que não tinha região. Hoje ele só age quando se
+pede um **subconjunto** próprio das três.
+
+Na tela, `ondeDe(ev)` mostra o **projeto** quando não há unidade: `"Sesc —"`
+não é lugar nenhum. O `.ics` do servidor (`publicar._local`) diz o mesmo — as
+duas implementações do calendário continuam obrigadas a coincidir.
+
+**A trava de 10% não viu nada**, e a lição é sobre travas: 81 eventos eram
+2,5% do total, bem abaixo do limite. Ela também media a coisa errada — o saldo
+do filtro, não o sintoma. Agora mede o que sempre quis medir: nome de unidade
+que **não existe** no mapa, que é o rastro de "o portal renomeou uma unidade".
+Isso é zero quando está tudo bem, então qualquer ocorrência aborta a coleta.
+
+### 6.3 Temporada que atravessa a janela inteira — 23 eventos
+
+A varredura de segurança só conhece a primeira e a última data. O código
+guardava as duas pontas e **depois** recortava na janela — então "Curumim
+2026" (fevereiro a dezembro), com as duas pontas fora dos 60 dias, ficava com
+lista de dias vazia e sumia. Eram 23 programas contínuos, quase todos de
+esporte e de criança, que acontecem toda semana e nunca apareceram.
+
+As pontas passaram a ser **grampeadas** na janela antes de entrar. `parcial`
+já era o campo que diz "esta lista de dias está incompleta", e a tela já
+avisa.
+
+### 6.4 Passeio sem data de inscrição — 20 eventos
+
+A retenção exigia **data** de inscrição de todo Turismo Social. Isso apagava o
+passeio que não tem inscrição nenhuma: *"Atividade aberta, sem retirada de
+ingressos, mediante capacidade do local"*, *"Acesso livre"*, *"30 vagas.
+Senhas na Loja Sesc com 30 minutos de antecedência"*. Não há o que datar
+nesses — a página diz exatamente como entrar, e era isso que se queria saber.
+Foram os três "Outras viagens" de Campinas e as caminhadas do Vila Mariana,
+entre outros.
+
+A regra passou a medir o que ela sempre quis dizer: sai o passeio de que não
+se sabe **como entrar** — nem data, nem texto, nem regra recorrente. São 3 na
+base de hoje, e neles a página realmente não conta como se participa.
+
+### 6.5 O sorteio que "não saiu" — a coleta é que era de antes
+
+"Jundiaí: os caminhos das águas" publicou os 13 contemplados às **14h**; o
+robô tinha coletado às **10h**. O extrator está certo (relido na mão, acha os
+13 códigos); o que faltava era hora. Com **uma** rodada por dia, de
+madrugada, a lista de contemplados **nunca** chegava no dia — e o Sesc publica
+às 14h ou às 16h.
+
+Três correções, e as três são necessárias:
+
+1. **Cadência da base.** O workflow grande ganhou uma segunda rodada, às 17h10
+   de Brasília (20:10 UTC).
+2. **Cadência do sorteio.** Uma rodada leve, de 20 em 20 minutos na janela em
+   que o Sesc publica, que lê só as páginas dos sorteios do dia e escreve um
+   arquivo de alguns KB. É o que faz o botão "Consultar" cumprir o que promete
+   — ver 5.2.3.
+3. **A frase.** O app dizia *"a lista ainda não foi publicada"* — afirmação
+   que ele não tem como fazer, porque não lê a página do Sesc (sem CORS, ver
+   5.2.1); ele lê o que o **robô** leu. Agora diz de que horas foi a última
+   conferência, avisa quando ela é anterior ao horário do sorteio, e aponta a
+   página oficial.
+
+**Correção de 09/09, à noite:** o levantamento acima dizia que *6 dos 13
+sorteios vencidos nunca teriam lista*. Errado, e o erro era nosso: em **3
+deles os códigos estavam publicados na página** — 28, 14 e 13 — e o extrator
+é que não os via, por causa do parêntese "(em ordem alfabética)" descrito
+na §3. O que enganou foi a leitura apressada: as três páginas *também*
+mencionam "Portal de Inscrições" e "Central de Atendimento", mas noutro
+trecho, sobre confirmação de vaga e pagamento. Procurar a frase sem ler o
+que está em volta do cabeçalho classifica errado.
+
+O limite verdadeiro é menor: **2 dos 13**, os que de fato só publicam o
+resultado num sistema com login. Para esses o app vai dizer "pendente" para
+sempre, e distinguir esse caso — o cabeçalho está lá, os códigos nunca
+estarão — continua sendo trabalho não feito.
+
+Vale a lição do método: *"o extrator não achou"* nunca é conclusão, é
+hipótese. A conclusão exige abrir a página e olhar o trecho em volta do
+cabeçalho.
+
+### 6.6 A data que o app inventou, com cara de fato — 350 eventos
+
+Sem prazo publicado o app presume **abertura + 3 dias**, e a regra da casa é
+que isso apareça sempre com "(estimado)" (ver 4.2). A linha da agenda cumpria
+a regra em "inscrição aberta" e a esquecia em "inscrição encerrada": 350
+eventos — **12% do catálogo** — afirmavam *"inscrição encerrada em 14 set"*
+sobre uma data que ninguém publicou. Quem lesse desistia de um prazo que
+talvez nem tivesse vencido.
+
+A causa é a de sempre nesse tipo de defeito: **cada ramo montava a sua data**,
+e a ressalva só foi acrescentada no ramo que motivou o recurso. Agora a data e
+a ressalva saem juntas de um lugar só, e há teste que recusa qualquer ramo que
+formate a data por fora.
+
+### 6.7 O que a suíte não pegava, e agora pega
+
+Noventa e nove testes, contra cinquenta e quatro. Os novos cobrem cada uma
+das causas acima e mais uma que apareceu **fazendo** a correção:
+
+Um ajudante novo chamado `localDe` sentou em cima do `localDe` que já existia
+para montar o `LOCATION` do `.ics`. O JS não reclama de redeclarar `function`:
+a segunda vence, e a antiga passou a chamar a si mesma, estourou a pilha e
+derrubou `aplicarDados` — o app abria com a base embutida e não trocava por
+nada. **Sintaxe perfeita, teste de sintaxe passando, app quebrado.** Só
+apareceu abrindo o app no navegador e lendo o console. Hoje há um teste que
+recusa duas funções com o mesmo nome no escopo de cima do app.
+
+---
+
+## 7. Estado atual e pendências
 
 ### Feito
 Tudo o que foi pedido até aqui está implementado e verificado no navegador.
@@ -424,7 +621,9 @@ Depois: **Settings → Pages → Source: GitHub Actions**, e
 
 O endereço sai como `https://SEU-USUARIO.github.io/agenda-sesc/`.
 
-O robô roda todo dia às 5h10 (08:10 UTC) e leva 30 a 45 minutos.
+A coleta grande roda duas vezes por dia — 5h10 e 17h10 de Brasília (08:10 e
+20:10 UTC) — e leva 30 a 45 minutos. A rodada leve dos sorteios roda de 20 em
+20 minutos das 13h às 20h e leva menos de um minuto (ver 5.2.3).
 
 `gh` CLI não está instalado e a conexão do GitHub não está autorizada na
 sessão — por isso o push não pode ser feito pelo assistente.
@@ -444,7 +643,7 @@ sessão — por isso o push não pode ser feito pelo assistente.
 
 ---
 
-## 7. Como rodar
+## 8. Como rodar
 
 Só precisa de Python 3.9+. Nenhuma dependência externa. **Node não está
 instalado nesta máquina.**
@@ -472,9 +671,9 @@ python publicar.py --base /agenda-sesc/  # subpasta do GitHub Pages
 
 ---
 
-## 8. Decisões de design
+## 9. Decisões de design
 
-### 8.0 v4 — "Cartaz" (o design em vigor)
+### 9.0 v4 — "Cartaz" (o design em vigor)
 
 A v3 era **papel e tinta**: guia impresso, fios finos no lugar de cartões,
 serifa nos títulos, sans na lista, monoespaçada nos dados, raio máximo 4px,
@@ -549,7 +748,7 @@ faceta global — agora vale também nos trilhos e nas contagens.
   `ReferenceError`. Bug antigo, exposto ao reaproveitar o código na folha de
   filtros. Definida.
 
-### 8.1 Computador
+### 9.1 Computador
 
 O app nasceu para o celular — uma coluna de 460px — e numa tela larga isso vira
 uma tira no meio de um deserto. A versão para computador é **só layout**: media
@@ -593,7 +792,7 @@ rolagem não fazem sentido nela.
 casca. Mudou o CSS e a tela não mudou? O SW está servindo o `index.html`
 antigo — é preciso desregistrar e limpar o cache, não basta recarregar.
 
-### 8.2 Calendário: o computador é outro bicho
+### 9.2 Calendário: o computador é outro bicho
 
 No celular o alvo é o app de agenda do aparelho, e o `.ics` é o que o sistema
 entende. No computador esse caminho não existe: o navegador baixa o arquivo e
@@ -609,7 +808,7 @@ O que **saiu** na v4: a folha de escolha de calendário (app / Google / Outlook
 resultado, para uma decisão que quase sempre tem uma resposta só. O botão faz
 o que diz; o resto é escolhido pelo contexto.
 
-### 8.3 Como rodar o backfill de fotos e endereços
+### 9.3 Como rodar o backfill de fotos e endereços
 
 ```bash
 python extras.py            # fotos + públicos + endereços das 43 unidades
@@ -620,3 +819,59 @@ python publicar.py
 
 O design system está no topo do CSS de `prototipo.html`, em tokens. Trocar os
 valores desse bloco reveste o app inteiro sem tocar em componente.
+
+---
+
+## 10. Divulgação (03/09/2026)
+
+A squad ganhou um sexto papel — **vídeo e marketing** — definido em
+`.claude/agents/video-marketing.md`. Ele carrega as regras que não podem se
+perder entre uma peça e outra: nunca imitar o Sesc, todo número conferido na
+base antes de entrar em tela, e nada de prometer o que o app não faz (ele não
+manda notificação, não vende ingresso, não inscreve e não adivinha sorteio).
+
+Pasta `divulgacao/`:
+
+| Arquivo | O quê |
+|---|---|
+| `filme.html` | A peça pronta, um arquivo só (~1,2 MB): 9:16, tour de 65 s, médio de 30 s, curto de 15 s e quadro parado. Abre em qualquer navegador; para virar MP4, grave a tela enquanto toca |
+| `filme.template.html` | O molde, com `{{TELA:nome}}` no lugar de cada foto — **edite este**, não o `filme.html` |
+| `montar_filme.py` | Troca cada marcação por um `data:` URI WebP e escreve o `filme.html` |
+| `capturar.py` | Fotografa as 12 telas do app rodando |
+| `cdp.py` | Cliente do DevTools Protocol em Python puro, escrito para isto |
+| `roteiro-lancamento.md` | Cenas, tempos, legendas, os números com a conta de cada um, e o histórico v1 → v3 |
+| `personas.md` | As seis fichas da validação de 02/09, agora em disco — antes só existiam no relatório publicado |
+| `plano-visual.md` | Paleta, tipografia e as decisões de forma |
+| `telas/` | As capturas, regeráveis (`_*.png` está no `.gitignore`) |
+
+Refazer tudo: `python divulgacao/capturar.py && python divulgacao/montar_filme.py`.
+
+### 10.1 As telas são fotografias do app, não maquete
+
+A v1 e a v2 recriavam a interface à mão; a v3 fotografa o app rodando. O
+`capturar.py` sobe um Edge headless conduzido pelo DevTools Protocol, semeia o
+`localStorage` (quatro unidades, credencial plena, três favoritos, um sorteio
+guardado), aperta os botões do próprio app e fotografa em 390×844 a 3×.
+
+Três armadilhas já resolvidas ali:
+
+* **`--screenshot` da linha de comando não serve.** No Windows a janela é
+  pedida em pixel físico e o viewport nasce em DIP com a escala do sistema:
+  pedir 390 entrega 492 CSS e a foto sai cortada à direita. Por isso o
+  `cdp.py` e o `Emulation.setDeviceMetricsOverride`.
+* **O Edge devolve o terminal antes de escrever o PNG** — um filho termina o
+  arquivo depois. Quem não espera, apaga o HTML que ele ainda está lendo.
+* **O portal recusa a foto quando o agente diz "HeadlessChrome".** Sem trocar
+  o `User-Agent`, toda capa vira a inicial colorida. `--sem-fotos` força esse
+  estado de propósito, se a peça precisar sair sem imagem de terceiro.
+
+**Ampliar a tela toda corta as laterais**, porque o recorte 9:16 não sobra em
+lugar nenhum. O detalhe vem numa lupa sobre o aparelho, posicionada em pixel a
+partir de `data-f` — a altura da faixa como fração da tela.
+
+**O endereço fica num lugar só:** `var ENDERECO`, no alto do script do molde.
+Hoje vale `acontece-no-sesc.github.io`, e aparece em três lugares — no quadro
+parado (a cena 2, que é o que viaja no WhatsApp), na chamada final e na última
+legenda. Vazio, a peça cai numa frase genérica em vez de inventar uma URL.
+
+Peça publicada: https://claude.ai/code/artifact/41247c3c-318a-47c7-9891-5883b32078e6

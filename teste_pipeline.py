@@ -467,5 +467,233 @@ class BuscaLivreDeVariasPalavras(unittest.TestCase):
                       "a sobra precisa ser casada palavra a palavra")
 
 
+class ResultadoDeSorteio(unittest.TestCase):
+    """O app não lê a página do Sesc; lê a coleta.
+
+    A página da atividade não manda CORS, então a única notícia que o app
+    tem sobre um sorteio é a idade da própria coleta. Enquanto ele dizia
+    "a lista ainda não foi publicada", afirmava o que não sabia — e quem
+    abria o app na tarde do sorteio de Jundiaí (resultado às 14h, coleta
+    das 10h) ia embora achando que não havia resultado, com a lista já na
+    tela do portal.
+    """
+
+    def setUp(self):
+        self.js = js_de(ler(PROTOTIPO))
+
+    def test_nao_afirma_que_a_lista_nao_saiu(self):
+        for frase in ("ainda não foi publicada", "ainda não foi realizado"):
+            self.assertNotIn(frase, self.js,
+                             "o app não tem como saber isso: ele só sabe o "
+                             "que veio na coleta")
+
+    def test_a_frase_de_atraso_diz_de_quando_e_a_informacao(self):
+        i = self.js.index("function textoAtrasado")
+        trecho = self.js[i:i + 1400]
+        self.assertIn("olhadaFmt()", trecho,
+                      "sem a hora da conferência a pessoa não sabe de quando "
+                      "é a informação que está lendo")
+        self.assertIn("página oficial", trecho,
+                      "quando nem a conferência tem a lista, quem tem é o "
+                      "portal — e o caminho para lá é um toque")
+
+    def test_o_toast_de_consultar_nao_contradiz_o_cartao(self):
+        i = self.js.index("function consultarSorteio")
+        trecho = self.js[i:i + 900]
+        self.assertIn("Ainda sem lista na conferência de", trecho,
+                      "o toast e o cartão têm de contar a mesma história")
+        self.assertIn("olhadaFmt()", trecho)
+
+    def test_robo_roda_duas_vezes_por_dia(self):
+        """Uma rodada só, de madrugada, nunca alcança um resultado das 14h."""
+        wf = ler(os.path.join(RAIZ, ".github", "workflows", "atualizar.yml"))
+        crons = re.findall(r"- cron: \"([^\"]+)\"", wf)
+        self.assertGreaterEqual(len(crons), 2,
+                                "com uma rodada por dia a lista de "
+                                "contemplados chega sempre no dia seguinte")
+        horas = sorted(int(c.split()[1]) for c in crons)
+        self.assertTrue(any(h >= 17 for h in horas),
+                        "falta uma rodada depois das 14h de Brasília "
+                        "(17h UTC), que é quando o Sesc publica o sorteio")
+
+
+class PrazoPresumidoSempreMarcado(unittest.TestCase):
+    """Data que o app inventou não pode aparecer com cara de fato.
+
+    Sem prazo publicado o app presume abertura + 3 dias, e a regra da casa é
+    que isso vem sempre com "(estimado)". A linha da agenda cumpria a regra
+    em "inscrição aberta" e a esquecia em "inscrição encerrada": 350 eventos
+    (12% da base) afirmavam um encerramento inventado. Quem lesse desistia de
+    um prazo que talvez nem tivesse vencido.
+    """
+
+    def test_os_dois_estados_usam_a_mesma_marca(self):
+        js = js_de(ler(PROTOTIPO))
+        i = js.index("function notaInscricao")
+        trecho = js[i:i + 1500]
+        self.assertEqual(trecho.count("f.presumido"), 1,
+                         "cada ramo montando a sua data é como o "
+                         "\"(estimado)\" sumiu de um deles")
+        for estado in ('est === "aberta"', 'est === "encerrada"'):
+            j = trecho.index(estado)
+            self.assertIn("marca", trecho[j:j + 120],
+                          "%s monta a data à mão e perde a ressalva" % estado)
+
+    def test_nenhum_ramo_formata_a_data_por_fora(self):
+        js = js_de(ler(PROTOTIPO))
+        i = js.index("function notaInscricao")
+        trecho = js[i:i + 1500]
+        self.assertNotIn('" em " + curta(f.dia)', trecho)
+        self.assertNotIn('" até " + curta(f.dia)', trecho)
+
+
+class NomeDeFuncaoUnico(unittest.TestCase):
+    """Duas funções com o mesmo nome no app: a segunda apaga a primeira.
+
+    O app é um `<script>` só, e o JS não reclama de redeclarar `function`.
+    Um ajudante novo chamado `localDe` sentou em cima do `localDe` que
+    montava o LOCATION do .ics — que passou a chamar a si mesmo, estourou a
+    pilha e derrubou `aplicarDados`: o app abria com a base embutida e não
+    trocava mais por nada. Nenhum teste viu, porque a sintaxe estava
+    perfeita; só apareceu abrindo o app no navegador.
+    """
+
+    def test_nenhuma_funcao_e_declarada_duas_vezes(self):
+        js = js_de(ler(PROTOTIPO))
+        # só o escopo de cima: `function pintar()` aparece três vezes, cada
+        # uma dentro de uma função diferente, e ali não há colisão nenhuma
+        nomes = re.findall(r"^  function ([A-Za-z_$][\w$]*)\s*\(", js, re.M)
+        repetidos = sorted({n for n in nomes if nomes.count(n) > 1})
+        self.assertEqual(repetidos, [],
+                         "redeclarada(s): %s — a segunda vence e a primeira "
+                         "some sem erro nenhum" % ", ".join(repetidos))
+
+
+class AtividadeSemUnidade(unittest.TestCase):
+    """Nem toda atividade acontece numa unidade.
+
+    "Sesc na Bienal do Livro", "Semana Move" e "Festival Sesc 80 Anos"
+    chegam da fonte com `unidade[0].name` nulo. O coletor grava "—", e a
+    tela mostrava "Sesc —", que não é lugar nenhum. Quem localiza a pessoa
+    nesses casos é o projeto.
+    """
+
+    def test_o_app_tem_uma_funcao_so_para_isso(self):
+        js = js_de(ler(PROTOTIPO))
+        self.assertIn("function ondeDe(ev, curto)", js)
+        i = js.index("function ondeDe(ev, curto)")
+        self.assertIn("ev.projeto", js[i:i + 300],
+                      "sem unidade, o projeto é o que resta para localizar")
+
+    def test_nenhuma_tela_monta_o_local_a_mao(self):
+        js = js_de(ler(PROTOTIPO))
+        sobras = [l for l in js.split("\n")
+                  if '"Sesc " + ev.uni' in l or '"Sesc " + e.uni' in l]
+        self.assertEqual(sobras, [],
+                         "concatenar direto ressuscita o \"Sesc —\": use "
+                         "localDe(ev)")
+
+    def test_o_ics_do_servidor_diz_a_mesma_coisa(self):
+        """As duas implementações do .ics têm de dizer a mesma coisa."""
+        import publicar
+        fora = {"uni": "—", "projeto": "Sesc na Bienal do Livro"}
+        self.assertEqual(publicar._local(fora), "Sesc na Bienal do Livro")
+        dentro = {"uni": "Pompeia"}
+        self.assertTrue(publicar._local(dentro).startswith("Sesc Pompeia"))
+
+
+class ConsultaDeSorteioAoVivo(unittest.TestCase):
+    """"Consultar" tem de dar a resposta agora, e por um arquivo pequeno.
+
+    Ler a página do Sesc no toque é impossível: o portal libera CORS no
+    /wp-json e recusa em todo o HTML — reconferido em 09/09/2026, no Chrome,
+    a partir do endereço de produção. Quem lê é o robô, de 20 em 20 minutos
+    na janela do sorteio, e o app busca o resultado em `sorteados.json`.
+    Baixar 3,5 MB para conferir oito letras cobraria de quem usa o preço de
+    um problema nosso.
+    """
+
+    def setUp(self):
+        self.js = js_de(ler(PROTOTIPO))
+
+    def test_o_app_tem_a_fonte_magra(self):
+        self.assertIn('var FONTE_SORTEADOS = "dados/sorteados.json"', self.js)
+
+    def test_consultar_tenta_o_arquivo_magro_primeiro(self):
+        i = self.js.index("function consultarSorteio")
+        trecho = self.js[i:i + 1400]
+        self.assertIn("buscarSorteados()", trecho)
+        pos_magro = trecho.index("buscarSorteados()")
+        self.assertIn("buscarDados(", trecho,
+                      "a base inteira continua sendo o plano B, para o app "
+                      "publicado antes de sorteados.json existir")
+        self.assertLess(pos_magro, trecho.index("buscarDados("),
+                        "a base inteira não pode ser a primeira tentativa")
+
+    def test_a_conferencia_tem_carimbo_proprio(self):
+        """A base é de 2x por dia e a conferência, de 20 em 20 minutos."""
+        i = self.js.index("function textoAtrasado")
+        trecho = self.js[i:i + 900]
+        self.assertIn("olhadaFmt()", trecho)
+        self.assertNotIn("coletaFmt()", trecho,
+                         "dizer a hora da coleta envelheceria a resposta em "
+                         "horas, no único assunto em que minutos importam")
+
+    def test_a_publicacao_gera_o_arquivo_magro(self):
+        fonte = ler(os.path.join(RAIZ, "publicar.py"))
+        self.assertIn('"dados", "sorteados.json"', fonte)
+        self.assertIn("sorteadosEm", fonte,
+                      "sem o carimbo na base, a primeira tela não sabe de "
+                      "quando é a conferência")
+
+    def test_service_worker_nao_serve_a_lista_do_cache(self):
+        fonte = ler(os.path.join(RAIZ, "publicar.py"))
+        self.assertIn("endsWith('sorteados.json')", fonte,
+                      "servir a lista do cache devolveria justamente a "
+                      "resposta velha que o botão existe para não dar")
+
+    def test_as_duas_rodadas_dividem_o_mesmo_grupo(self):
+        """Duas publicações simultâneas no mesmo Pages é como uma coleta pela
+        metade vai ao ar. O grupo só protege enquanto o NOME bate nos dois —
+        e conferir cada arquivo por si não veria a dessincronia."""
+        grupos = []
+        for nome in ("atualizar.yml", "sorteios.yml"):
+            wf = ler(os.path.join(RAIZ, ".github", "workflows", nome))
+            m = re.search(r"^concurrency:\n(?:.*\n)*?\s*group:\s*(\S+)",
+                          wf, re.M)
+            self.assertIsNotNone(m, "%s sem grupo de concorrência" % nome)
+            grupos.append(m.group(1))
+        self.assertEqual(grupos[0], grupos[1],
+                         "grupos diferentes (%s): as duas rodadas podem "
+                         "publicar ao mesmo tempo" % " / ".join(grupos))
+
+    def test_a_publicacao_sobrevive_a_lista_corrompida(self):
+        """Um JSON truncado não pode derrubar o build: a base ao lado tem
+        tudo o que é preciso para refazer o arquivo."""
+        fonte = ler(os.path.join(RAIZ, "publicar.py"))
+        i = fonte.index('fonte_sort = os.path.join(')
+        trecho = fonte[i:i + 1200]
+        self.assertIn("except Exception", trecho,
+                      "json.load sem proteção derruba a publicação inteira")
+        self.assertIn("refazendo a partir da base", trecho)
+
+    def test_o_robo_leve_roda_na_janela_do_sorteio(self):
+        wf = ler(os.path.join(RAIZ, ".github", "workflows", "sorteios.yml"))
+        self.assertIn('cron: "*/20 16-23 * * *"', wf,
+                      "13h às 20h de Brasília é a janela em que o Sesc publica")
+        self.assertIn("group: atualizar", wf,
+                      "as duas rodadas publicam no mesmo Pages e não podem "
+                      "se cruzar")
+        self.assertIn("set -o pipefail", wf,
+                      "o shell do runner é `bash -e` sem pipefail: num cano "
+                      "quem decide o exit code é o tee, e o passo terminaria "
+                      "verde com o script estourado no meio")
+        self.assertIn("--anterior publicado.json", wf,
+                      "sem comparar com o que está no ar, as 21 rodadas de "
+                      "uma tarde republicam o site 21 vezes")
+        self.assertIn("needs.sorteios.outputs.novas != '0'", wf,
+                      "publicar sem artefato derruba o site que está no ar")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
