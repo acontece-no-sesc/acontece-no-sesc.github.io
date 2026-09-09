@@ -94,11 +94,25 @@ def manter(ev, hoje, horizonte):
     if not any(d >= hoje for d in (ev.get("dias") or [])):
         return False
 
-    # Passeio sem data de inscrição publicada não é oferta: ou já passou da
-    # fase (caso dos que só têm o resultado do sorteio na página) ou não dá
-    # para saber como entrar. Mostrar isso só gera expectativa vazia.
-    if ev.get("cat") in SO_COM_INSCRICAO and not i.get("inscricao"):
-        return False
+    # Passeio de que não se sabe COMO ENTRAR não é oferta: mostrar só gera
+    # expectativa vazia. O que não vale é medir isso pela data.
+    #
+    # A versão anterior exigia data de inscrição, e com isso apagava o passeio
+    # que não tem inscrição nenhuma — "Atividade aberta, sem retirada de
+    # ingressos, mediante capacidade do local", "Acesso livre", "30 vagas.
+    # Senhas na Loja Sesc com 30 minutos de antecedência". Nesses a página diz
+    # exatamente como entrar; o que ela não tem é data, porque não há o que
+    # datar. Eram 20 passeios, entre eles os três "Outras viagens" de Campinas
+    # e as caminhadas do Vila Mariana.
+    #
+    # Sai quem não tem NEM data NEM texto: aí a página realmente não conta
+    # como se participa, e é o caso dos passeios que só guardam o resultado de
+    # um sorteio antigo. Prazo vencido não entra aqui — é etiqueta, como em
+    # todas as outras categorias desde que "Inscrição encerrada" existe.
+    if ev.get("cat") in SO_COM_INSCRICAO:
+        if not (i.get("inscricao") or (i.get("texto") or "").strip()
+                or i.get("regras")):
+            return False
 
     aberturas = [d for d in (_dia(i.get("inscricao")),
                              _dia(ev.get("vendaOnline")),

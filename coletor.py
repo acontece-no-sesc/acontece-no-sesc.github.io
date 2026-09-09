@@ -30,6 +30,7 @@ Uso:
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -78,12 +79,22 @@ def buscar(url, tentativa=1):
         return buscar(url, tentativa + 1)
 
 
+# O nome da unidade é a ÚNICA chave entre a atividade e a região, e o portal
+# não o digita duas vezes igual: "São Caetano " chega com um espaço sobrando
+# na listagem e sem ele em /unidades-atividades. Vinte e sete atividades
+# ficaram com região "outra" por causa desse espaço — e "outra" era descarte
+# na saída do coletor. Normalizar os dois lados custa uma linha; não
+# normalizar apaga uma unidade inteira, em silêncio.
+def chave_unidade(nome):
+    return re.sub(r"\s+", " ", (nome or "")).strip()
+
+
 def carregar_unidades():
     """Devolve {nome_da_unidade: regiao}."""
     dados = buscar(API_UNIDADES)
     mapa = {}
     for u in dados:
-        nome = (u.get("name") or "").strip()
+        nome = chave_unidade(u.get("name"))
         regiao = (u.get("description") or "").strip().lower()
         if nome:
             mapa[nome] = regiao if regiao in REGIOES_VALIDAS else "outra"
@@ -166,7 +177,7 @@ def melhor_foto(a):
 
 def normalizar(a, unidades):
     """Achata um item da API no formato que o app consome."""
-    uni = primeiro(a.get("unidade")) or "—"
+    uni = chave_unidade(primeiro(a.get("unidade"))) or "—"
     ling = a.get("tipos_linguagens") or []
     cat = sub = None
     if ling and isinstance(ling[0], dict):
@@ -341,9 +352,19 @@ def coletar(de, ate, regioes):
 
             ev = normalizar(a, unidades)
             # não sabemos os dias intermediários de uma temporada; ficam a
-            # primeira e a última, e detalhes.py corrige quando há bilheteria
-            dias = {ini} if ini == fim else {ini, fim}
-            ev["dias"] = sorted(d for d in dias if de.isoformat() <= d <= ate.isoformat())
+            # primeira e a última, e detalhes.py corrige quando há bilheteria.
+            #
+            # As pontas são GRAMPEADAS na janela antes de entrar. Recortar
+            # depois apagava a temporada que atravessa a janela inteira —
+            # "Curumim 2026" vai de fevereiro a dezembro, e as duas pontas
+            # caem fora dos 60 dias, então a lista ficava vazia e o programa
+            # sumia do app. Eram 23 programas contínuos, todos de esporte e
+            # de criança, que acontecem toda semana e nunca apareceram.
+            # `parcial` já é o campo que diz "esta lista de dias está
+            # incompleta"; a tela avisa.
+            de_iso, ate_iso = de.isoformat(), ate.isoformat()
+            dias = {max(ini, de_iso), min(fim, ate_iso)}
+            ev["dias"] = sorted(d for d in dias if de_iso <= d <= ate_iso)
             if not ev["dias"]:
                 continue
             ev["parcial"] = ini != fim
@@ -359,29 +380,42 @@ def coletar(de, ate, regioes):
 
     lista = list(eventos.values())
 
-    if regioes:
+    # O filtro de região serve para PEDIR MENOS ("só a capital"). Quem pede as
+    # três está pedindo tudo, e nesse caso ele não pode descartar nada — era o
+    # que fazia, porque `reg` também vale "outra", e "outra" não está entre as
+    # três. Sumiam 54 atividades que simplesmente não têm unidade na fonte:
+    # `unidade[0].name` vem `null` na programação que acontece fora de uma
+    # unidade — "Sesc na Bienal do Livro" sozinho eram 39 eventos gratuitos
+    # desta semana, além de "Semana Move" e "Festival Sesc 80 Anos".
+    if regioes and set(regioes) < set(REGIOES_VALIDAS):
         antes = len(lista)
         lista = [e for e in lista if e["reg"] in regioes]
         print("Filtro de região %s: %d -> %d eventos" % (regioes, antes, len(lista)))
-        # `normalizar` põe "outra" em toda unidade que não bate EXATAMENTE com
-        # um `name` de /unidades-atividades, e o filtro então a descarta. Basta
-        # o portal renomear uma unidade, ou trocar o vocabulário de
-        # `description`, para isso virar exclusão em massa — com uma linha
-        # informativa de log como único sinal. Hoje são zero; a trava existe
-        # para que continue sendo notícia quando deixar de ser.
-        fora = antes - len(lista)
-        if antes and fora > antes * 0.1:
-            raise SystemExit(
-                "ABORTADO: o filtro de região descartou %d de %d eventos (%.0f%%). "
-                "Provavelmente uma unidade mudou de nome ou a região deixou de "
-                "vir como capital/interior/litoral. Nada foi gravado."
-                % (fora, antes, 100.0 * fora / antes))
-        if not any(e["cat"] == CAT_TURISMO for e in lista):
-            raise SystemExit(
-                "ABORTADO: nenhum evento de %s na coleta. A categoria é usada "
-                "por três regras diferentes (viagem contínua, retenção e "
-                "raspagem de HTML); se ela mudou de nome, as três se apagam em "
-                "silêncio. Nada foi gravado." % CAT_TURISMO)
+
+    # A trava continua, mas medindo o que ela sempre quis medir: unidade com
+    # NOME que não bate com nenhum `name` de /unidades-atividades. É esse o
+    # sintoma de "o portal renomeou uma unidade", e ele é zero quando está
+    # tudo bem. Antes a trava olhava o resultado do filtro, e por isso não viu
+    # nem o espaço sobrando em "São Caetano " (27 eventos) nem a programação
+    # sem unidade (54): ficou abaixo dos 10% e passou calada.
+    orfas = sorted({e["uni"] for e in lista
+                    if e["uni"] != "—" and e["uni"] not in unidades})
+    if orfas:
+        raise SystemExit(
+            "ABORTADO: %d nome(s) de unidade que não existem em "
+            "/unidades-atividades: %s. Provavelmente uma unidade mudou de "
+            "nome. Sem correspondência elas ficam sem região e sem endereço. "
+            "Nada foi gravado." % (len(orfas), ", ".join(repr(o) for o in orfas)))
+    sem_unidade = sum(1 for e in lista if e["uni"] == "—")
+    if sem_unidade:
+        print("Mantidos %d eventos sem unidade na fonte (região \"outra\")"
+              % sem_unidade)
+    if not any(e["cat"] == CAT_TURISMO for e in lista):
+        raise SystemExit(
+            "ABORTADO: nenhum evento de %s na coleta. A categoria é usada "
+            "por três regras diferentes (viagem contínua, retenção e "
+            "raspagem de HTML); se ela mudou de nome, as três se apagam em "
+            "silêncio. Nada foi gravado." % CAT_TURISMO)
 
     # Descartado agora só o cancelado. "Outros" é o balde do que o portal não
     # categorizou — jogá-lo fora tirava da agenda atividades que existem de
