@@ -3630,9 +3630,21 @@
     return "O Sesc marcou o resultado para " + dh(quando) + ". A lista não estava lá na última conferência"
       + (cedo ? ", de " + olhadaFmt() + " — anterior ao horário do sorteio"
               : " de " + olhadaFmt())
-      + ". O robô olha de 20 em 20 minutos na tarde do sorteio; "
-      + "\"Consultar\" força a conferência agora, e \"Abrir página\" leva à "
-      + "página oficial.";
+      // Aqui havia duas promessas que o app não pode cumprir, e prometer o
+      // que não se cumpre é o defeito que esta tela inteira existe para não
+      // repetir:
+      //
+      // "o robô olha de 20 em 20 minutos" — é o que o cron PEDE. Medido em
+      // 10/09/2026 sobre 8 execuções agendadas deste repositório, o GitHub
+      // começa entre 3h38 e 6h02 depois da hora marcada, média de 4h36. O
+      // intervalo é um pedido, não um horário.
+      //
+      // "Consultar força a conferência agora" — não força nada: ele rebusca
+      // a lista que o robô publicou. Quem lê a página do Sesc é o robô, e
+      // esta tela não manda nele.
+      + ". \"Consultar\" busca de novo a lista publicada; quem tem o "
+      + "resultado no instante em que ele sai é a página oficial, em "
+      + "\"Abrir página\".";
   }
 
   function renderSorteios() {

@@ -393,9 +393,30 @@ Duas peças:
    inteira continua sendo o plano B, para quem tem instalado um app anterior a
    este arquivo — ali o `404` cai de volta na base e nada quebra.
 
-A defasagem cai de **um dia para vinte minutos**. Medido no caso que originou
-tudo: "Jundiaí: os caminhos das águas" publicou 13 contemplados às 14h; com a
-rodada leve, o app os teria por volta das 14h20.
+**O intervalo do cron é um pedido, não um horário.** Medido em 10/09/2026
+sobre as 8 execuções agendadas deste repositório, pela API pública do
+GitHub: a rodada diária começa entre **3h38 e 6h02** depois da hora marcada,
+média de 4h36. A única execução agendada da rodada leve que houve até agora
+começou 2h26 depois do tique. Não é defeito nosso — o GitHub atrasa
+`schedule` em repositório gratuito, e quanto mais popular o horário, pior.
+
+Consequências, e elas são duas:
+
+1. **A tela não promete cadência.** Dizia "o robô olha de 20 em 20 minutos"
+   e "Consultar força a conferência agora"; as duas eram falsas — a segunda
+   sempre foi, porque "Consultar" rebusca a lista publicada e não manda no
+   robô. Hoje a frase diz de quando é a última conferência (que é sempre
+   verdade) e aponta a página oficial. Há teste que recusa a volta das duas.
+2. **O caminho para cadência de verdade existe, e não é `schedule`.** O
+   `workflow_dispatch` não é atrasado: o disparo manual de 09/09 começou
+   um minuto depois do clique. Um agendador externo chamando a API do
+   GitHub entregaria os 20 minutos — ao preço de um token guardado fora
+   daqui. Não foi feito.
+
+A defasagem real, então, cai de **um dia para algumas horas** — melhor do que
+era, e menos do que o cron sugere. Medido no caso que originou tudo:
+"Jundiaí: os caminhos das águas" publicou 13 contemplados às 14h; a lista
+chegou ao app na rodada da noite.
 
 Duas travas que o desenho exige:
 

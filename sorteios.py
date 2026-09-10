@@ -41,7 +41,7 @@ import argparse
 import json
 import os
 import time
-from datetime import timedelta
+from datetime import date, timedelta
 
 import coletor
 import detalhes
@@ -62,7 +62,11 @@ def pendentes(eventos, hoje, dias):
     inteira. Quem já tem `sorteados` não volta à fila — a lista publicada não
     muda, e reler seria bater na página do portal à toa.
     """
-    limite = (coletor.agora_br().date() - timedelta(days=dias)).isoformat()
+    # O limite sai do `hoje` RECEBIDO, não do relógio. Lendo o relógio, a
+    # função devolvia coisas diferentes conforme a hora em que fosse chamada,
+    # ignorando o argumento que existe justamente para fixá-la — e o teste
+    # que a cobre passou num dia e falhou no seguinte, sem nada ter mudado.
+    limite = (date.fromisoformat(hoje) - timedelta(days=dias)).isoformat()
     fila = []
     for ev in eventos:
         if ev.get("sorteados"):
@@ -170,7 +174,7 @@ def main():
 
     fila = pendentes(eventos, hoje, args.dias)
     print("Sorteios sem lista, divulgação entre %s e %s: %d"
-          % ((coletor.agora_br().date() - timedelta(days=args.dias)).isoformat(),
+          % ((date.fromisoformat(hoje) - timedelta(days=args.dias)).isoformat(),
              hoje, len(fila)))
     if len(fila) > args.max:
         print("  teto de %d páginas: os %d mais recentes"

@@ -487,9 +487,28 @@ class ResultadoDeSorteio(unittest.TestCase):
                              "o app não tem como saber isso: ele só sabe o "
                              "que veio na coleta")
 
+    def test_a_frase_nao_promete_cadencia(self):
+        """O intervalo do cron é um PEDIDO, não um horário.
+
+        Medido em 10/09/2026 sobre 8 execuções agendadas deste repositório:
+        o GitHub começa entre 3h38 e 6h02 depois da hora marcada, média de
+        4h36. Dizer "de 20 em 20 minutos" na tela é afirmar o que não se
+        cumpre — o mesmo defeito que esta tela existe para não repetir.
+        """
+        # Comentário pode (e deve) dizer que o cron PEDE 20 minutos, e
+        # explicar por que a promessa saiu da tela. O que não pode voltar é a
+        # promessa — então o que se mede aqui é o código sem comentário
+        # nenhum, das duas formas.
+        codigo = re.sub(r"/\*.*?\*/", " ", self.js, flags=re.S)
+        codigo = "\n".join(l for l in codigo.splitlines()
+                           if not l.strip().startswith("//"))
+        for frase in ("de 20 em 20 minutos", "força a conferência"):
+            self.assertNotIn(frase, codigo,
+                             "a tela promete o que o app não controla")
+
     def test_a_frase_de_atraso_diz_de_quando_e_a_informacao(self):
         i = self.js.index("function textoAtrasado")
-        trecho = self.js[i:i + 1400]
+        trecho = self.js[i:i + 2200]
         self.assertIn("olhadaFmt()", trecho,
                       "sem a hora da conferência a pessoa não sabe de quando "
                       "é a informação que está lendo")
