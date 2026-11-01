@@ -1,0 +1,68 @@
+name: Sonda do portal
+
+# Diagnóstico temporário, não faz parte do pipeline. Existe por causa do
+# 403: desde 31/10/2026 às 14:29 UTC nada que sai do GitHub Actions chega ao
+# portal, enquanto a mesma URL com o mesmo User-Agent responde 200 da máquina
+# de casa. Falta saber o que está sendo barrado.
+#
+#   - se TODOS os User-Agents levarem 403, o bloqueio é da faixa de IP da
+#     Azure, e não há conserto dentro do Actions;
+#   - se o UA de navegador passar, o bloqueio é de impressão digital do
+#     cliente, e aí a decisão é de política, não de código.
+#
+# São 6 requisições, uma por variante, com pausa entre elas: menos do que
+# uma única página da coleta normal. Só roda a mão, nunca em agenda.
+# Apagar quando a dúvida estiver respondida.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sondar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: De onde este runner sai
+        run: |
+          echo "IP de saída: $(curl -s --max-time 20 https://api.ipify.org || echo '?')"
+
+      # O mesmo UA do coletor, um UA de navegador e nenhum UA, contra três
+      # caminhos: a listagem que falha, a página de uma unidade (HTML) e a
+      # bilheteria, que mora em outro host. Se o 403 for só de um caminho, é
+      # regra de WAF; se for de todos, é o cliente que está barrado.
+      - name: Medir
+        run: |
+          UA_NOSSO='agenda-sesc-prototipo/1.0 (coletor de programacao publica; uso pessoal)'
+          UA_NAV='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+          medir () {
+            rotulo="$1"; ua="$2"; url="$3"
+            if [ -z "$ua" ]; then
+              code=$(curl -s -o corpo.txt -D cab.txt -w '%{http_code}' --max-time 30 -H 'User-Agent:' "$url" || echo erro)
+            else
+              code=$(curl -s -o corpo.txt -D cab.txt -w '%{http_code}' --max-time 30 -A "$ua" "$url" || echo erro)
+            fi
+            bytes=$(wc -c < corpo.txt | tr -d ' ')
+            echo "=== $rotulo"
+            echo "    HTTP $code · ${bytes}B · $url"
+            grep -iE '^(server|cf-ray|cf-cache-status|x-cache|x-akamai|retry-after|x-sucuri|x-iinfo|via):' cab.txt | sed 's/^/    /' || true
+            if [ "$code" != "200" ]; then
+              echo "    corpo (300 primeiros caracteres):"
+              head -c 300 corpo.txt | tr -d '\r' | sed 's/^/      /'
+              echo ""
+            fi
+            sleep 3
+          }
+
+          LISTAGEM='https://www.sescsp.org.br/wp-json/wp/v1/unidades-atividades'
+          UNIDADE='https://www.sescsp.org.br/unidades/14-bis/'
+          BILHETERIA='https://portal.sescsp.org.br/bilheteria/atividade.action?idAtividade=1'
+
+          medir "listagem · UA do coletor"   "$UA_NOSSO" "$LISTAGEM"
+          medir "listagem · UA de navegador" "$UA_NAV"   "$LISTAGEM"
+          medir "listagem · sem UA"          ""          "$LISTAGEM"
+          medir "unidade (HTML) · UA do coletor"   "$UA_NOSSO" "$UNIDADE"
+          medir "unidade (HTML) · UA de navegador" "$UA_NAV"   "$UNIDADE"
+          medir "bilheteria · UA do coletor"       "$UA_NOSSO" "$BILHETERIA"
