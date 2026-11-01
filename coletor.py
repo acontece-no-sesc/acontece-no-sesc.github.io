@@ -55,11 +55,63 @@ API_ATIVIDADES = BASE + "/wp-json/wp/v1/atividades/filter"
 PPP = 300
 PAUSA = 0.35          # segundos entre requisições — o portal não é nosso
 TIMEOUT = 30
-TENTATIVAS = 3
+
+# Paciência com o portal. Eram 3 tentativas esperando 2s e 4s: a rodada
+# inteira desistia em 6 segundos. Foi assim que as duas coletas de 31/10/2026
+# morreram — a PRIMEIRA requisição, a das unidades, falhou as três vezes e o
+# passo terminou antes de coletar um único dia, com a fonte íntegra na manhã
+# seguinte. O portal cai e volta; a coleta roda duas vezes por dia e tem 180
+# minutos de folga no job. Esperar um minuto é barato, perder o dia não é.
+TENTATIVAS = 6
+ESPERAS = (2, 5, 10, 20, 40)   # ~77s de paciência somada, por URL
+
+# Erro de servidor e aperto de banda passam sozinhos; 404 e 400 não. Repetir
+# os segundos gasta 77 segundos para chegar na mesma resposta e ainda embaça o
+# diagnóstico: "falhou 6 vezes" se lê como instabilidade quando a URL mudou.
+# 403 fica na lista porque é com ele que o WAF do portal barra tráfego que
+# achou suspeito, e isso passa.
+REPETIVEIS = (403, 408, 425, 429, 500, 502, 503, 504)
+ESPERA_MAXIMA = 120           # teto para um Retry-After que o portal mande
+
+# O que "o portal não respondeu" significa em exceções. `URLError` é a mãe de
+# `HTTPError`, então cobre as duas; `JSONDecodeError` entra porque a página de
+# manutenção do WAF chega com HTTP 200 e HTML dentro.
+FALHA_DE_REDE = (urllib.error.URLError, TimeoutError, json.JSONDecodeError)
+
+# Quantos dias da janela a rodada pode perder e ainda ser uma rodada. Um dia
+# é ruído do portal, e a varredura de segurança adiante recupera o evento
+# pelas datas do próprio registro. Um décimo da janela é outra coleta, e
+# publicá-la por boa troca a base de ontem por um recorte pior.
+FRACAO_DIAS_FALHOS = 0.1
 
 UA = "agenda-sesc-prototipo/1.0 (coletor de programacao publica; uso pessoal)"
 
 REGIOES_VALIDAS = ("capital", "interior", "litoral")
+
+
+def repetivel(e):
+    """Se vale esperar e pedir de novo, ou se a resposta não vai mudar."""
+    if isinstance(e, urllib.error.HTTPError):
+        return e.code in REPETIVEIS
+    # Rede e JSON quebrado não dizem nada sobre a URL: DNS, conexão recusada,
+    # tempo esgotado, página de manutenção no lugar do envelope.
+    return True
+
+
+def espera_de(e, tentativa):
+    """Quanto dormir antes da próxima tentativa."""
+    padrao = ESPERAS[min(tentativa, len(ESPERAS)) - 1]
+    if isinstance(e, urllib.error.HTTPError):
+        # 429 e 503 costumam vir com Retry-After. Obedecer é mais educado e
+        # mais eficaz que o nosso palpite — com teto, porque o cabeçalho pode
+        # mandar esperar meia hora e aí a rodada estoura o job.
+        try:
+            pedido = int(str((e.headers or {}).get("Retry-After")).strip())
+        except (AttributeError, TypeError, ValueError):
+            pedido = 0
+        if 0 < pedido <= ESPERA_MAXIMA:
+            return max(padrao, pedido)
+    return padrao
 
 
 def buscar(url, tentativa=1):
@@ -70,11 +122,12 @@ def buscar(url, tentativa=1):
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             return json.loads(r.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
-        if tentativa >= TENTATIVAS:
+    except FALHA_DE_REDE as e:
+        if tentativa >= TENTATIVAS or not repetivel(e):
             raise
-        espera = 2 ** tentativa
-        print("    ! falhou (%s), repetindo em %ds" % (e, espera), file=sys.stderr)
+        espera = espera_de(e, tentativa)
+        print("    ! falhou (%s), tentativa %d de %d, repetindo em %ds"
+              % (e, tentativa, TENTATIVAS, espera), file=sys.stderr)
         time.sleep(espera)
         return buscar(url, tentativa + 1)
 
@@ -90,7 +143,13 @@ def chave_unidade(nome):
 
 
 def carregar_unidades():
-    """Devolve {nome_da_unidade: regiao}."""
+    """Devolve {nome_da_unidade: regiao}.
+
+    Esta falha continua sendo fatal, de propósito: o nome da unidade é a
+    única chave entre a atividade e a região, e sem o mapa toda a coleta sai
+    sem região e sem endereço. O que mudou é a paciência — era aqui, na
+    primeira requisição da rodada, que 6 segundos de teimosia decidiam o dia.
+    """
     dados = buscar(API_UNIDADES)
     mapa = {}
     for u in dados:
@@ -290,14 +349,41 @@ def coletar(de, ate, regioes):
     dia = de
     total_dias = (ate - de).days + 1
     n = 0
+    falhos = []
+    teto_falhos = max(1, int(total_dias * FRACAO_DIAS_FALHOS))
 
     while dia <= ate:
         n += 1
         iso = dia.isoformat()
         page = 1
         do_dia = 0
+        falhou = False
         while True:
-            envelope = buscar(url_dia(iso, page))
+            try:
+                envelope = buscar(url_dia(iso, page))
+            except FALHA_DE_REDE as e:
+                # Um dia perdido não vale a rodada inteira: a varredura de
+                # segurança adiante ainda recupera o evento pelas datas do
+                # próprio registro. O que se perde é a precisão dos dias
+                # intermediários, não o evento.
+                #
+                # Mas perda neste pipeline tem de gritar, então o dia entra no
+                # caderno e sai como aviso na aba Actions. E quando o portal
+                # está fora — não é tropeço, é fora — insistir nos 60 dias
+                # gastaria horas para abortar no fim: o teto corta na hora.
+                falhos.append(iso)
+                print("::warning::Dia %s não coletado depois de %d tentativas"
+                      " (%s). A varredura de segurança ainda pode recuperar"
+                      " os eventos, sem os dias intermediários." % (iso, TENTATIVAS, e))
+                if len(falhos) > teto_falhos:
+                    raise SystemExit(
+                        "ABORTADO: %d dias de %d não responderam (teto: %d). "
+                        "Isso não é tropeço do portal, é portal fora. Nada foi "
+                        "gravado — a base anterior continua no lugar e a próxima "
+                        "rodada tenta de novo. Dias: %s"
+                        % (len(falhos), total_dias, teto_falhos, ", ".join(falhos)))
+                falhou = True
+                break
             itens = envelope.get("atividade") or []
             total = (envelope.get("total") or {}).get("value", 0)
 
@@ -319,8 +405,14 @@ def coletar(de, ate, regioes):
             page += 1
             time.sleep(PAUSA)
 
-        print("  [%2d/%2d] %s  %4d sessões  (acumulado: %d eventos)"
-              % (n, total_dias, iso, do_dia, len(eventos)))
+        # "0 sessões" e "não respondeu" são coisas diferentes, e o log é o
+        # único lugar onde a diferença aparece depois.
+        if falhou:
+            print("  [%2d/%2d] %s  FALHOU         (acumulado: %d eventos)"
+                  % (n, total_dias, iso, len(eventos)))
+        else:
+            print("  [%2d/%2d] %s  %4d sessões  (acumulado: %d eventos)"
+                  % (n, total_dias, iso, do_dia, len(eventos)))
         dia += timedelta(days=1)
         time.sleep(PAUSA)
 
@@ -332,8 +424,28 @@ def coletar(de, ate, regioes):
     # ------------------------------------------------------------------
     print("Varredura de segurança (listagem sem filtro de data)…")
     page, recuperados = 1, 0
+    varredura_truncada = False
     while True:
-        envelope = buscar(url_geral(page))
+        try:
+            envelope = buscar(url_geral(page))
+        except FALHA_DE_REDE as e:
+            # Sem a primeira página não há varredura nenhuma, e é ela que
+            # recupera o que o filtro de data omite ("Ecos da Independência"
+            # e os 23 programas contínuos). Seguir sem ela publicaria buracos
+            # que ninguém veria.
+            if page == 1:
+                raise SystemExit(
+                    "ABORTADO: a varredura de segurança não respondeu nem na "
+                    "primeira página depois de %d tentativas (%s). É ela que "
+                    "recupera o que o filtro de data deixa de fora; sem ela a "
+                    "coleta sai com buracos invisíveis. Nada foi gravado."
+                    % (TENTATIVAS, e))
+            # Da segunda em diante o que já veio vale; o estrago de parar no
+            # meio é medido pelo piso de volume, em `conferir_volume`.
+            varredura_truncada = True
+            print("::warning::Varredura de segurança interrompida na página %d"
+                  " (%s). O que ela já recuperou vale." % (page, e))
+            break
         itens = envelope.get("atividade") or []
         total = (envelope.get("total") or {}).get("value", 0)
 
@@ -377,6 +489,21 @@ def coletar(de, ate, regioes):
         time.sleep(PAUSA)
 
     print("  recuperados %d eventos que o filtro de data não devolveu" % recuperados)
+
+    # As duas perdas toleradas acima se somam mal: dia falho conta com a
+    # varredura para recuperar o evento, e varredura truncada conta com os
+    # dias para já tê-lo pego. Faltando as duas, ninguém responde por esse
+    # pedaço da janela — e aí o silêncio é exatamente o que este pipeline não
+    # pode ter.
+    if falhos and varredura_truncada:
+        raise SystemExit(
+            "ABORTADO: %d dia(s) não responderam (%s) E a varredura de "
+            "segurança parou no meio. Uma coisa cobre a outra; as duas juntas, "
+            "não. Nada foi gravado — a base anterior continua no lugar."
+            % (len(falhos), ", ".join(falhos)))
+    if falhos:
+        print("Dias que não responderam: %d de %d (teto: %d) — %s"
+              % (len(falhos), total_dias, teto_falhos, ", ".join(falhos)))
 
     lista = list(eventos.values())
 

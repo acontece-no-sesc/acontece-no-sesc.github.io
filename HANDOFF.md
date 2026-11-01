@@ -896,3 +896,89 @@ parado (a cena 2, que é o que viaja no WhatsApp), na chamada final e na última
 legenda. Vazio, a peça cai numa frase genérica em vez de inventar uma URL.
 
 Peça publicada: https://claude.ai/code/artifact/41247c3c-318a-47c7-9891-5883b32078e6
+
+---
+
+## 11. O dia em que o portal piscou — 31/10/2026
+
+As duas rodadas de **Atualizar programação** daquele dia falharam no mesmo
+passo, `Coletar a listagem`. Nada foi gravado — o pipeline falhou do jeito que
+foi desenhado para falhar — e o site ficou servindo a base de 30/10 às 20:42
+por dois dias, correto e velho.
+
+O que entrega o diagnóstico é a **duração do passo**, não a mensagem: uma
+coleta inteira leva 4 a 5 minutos, e a rodada #119 morreu em **6 segundos**.
+Seis segundos era exatamente a paciência do coletor: `TENTATIVAS = 3`
+esperando 2s e 4s. Ou seja, ela morreu na **primeira requisição da rodada**,
+a das unidades, antes de pedir um único dia. A #118 durou 88s — dois timeouts
+de 30s seguidos. Na manhã seguinte a fonte respondia inteira: 43 unidades,
+nenhuma órfã, `Turismo Social` no lugar, 2.971 itens na varredura geral.
+
+Não era defeito nosso nem mudança de forma na fonte. Era o portal piscando, e
+uma teimosia de 6 segundos decidindo o dia.
+
+### 11.1 O que mudou em `coletor.py`
+
+**Paciência.** `TENTATIVAS = 6` com `ESPERAS = (2, 5, 10, 20, 40)` — 77
+segundos somados por URL, contra os 6 de antes. O job tem 180 minutos de
+folga; esperar um minuto é barato, perder o dia não é.
+
+**Insistir só onde há o que esperar.** `repetivel()` repete 5xx, 408, 425,
+429 e **403** (é com ele que o WAF do portal barra tráfego que achou
+suspeito, e isso passa). 404 e 400 levantam na primeira: repetir gastaria 77
+segundos para chegar na mesma resposta e ainda faria "falhou 6 vezes" parecer
+instabilidade quando a verdade é que a URL mudou.
+
+**`Retry-After` obedecido, com teto** de 120s (`ESPERA_MAXIMA`) — o cabeçalho
+pode mandar esperar meia hora, e aí a rodada estoura o job.
+
+**Página de manutenção conta como falha.** O WAF devolve HTTP **200 com HTML
+dentro**; isso levantava `JSONDecodeError` fora do `except` e derrubava a
+rodada na primeira, sem repetir. Agora `FALHA_DE_REDE` inclui o JSON quebrado.
+
+**Um dia perdido não vale os outros 59.** A consulta de um dia que falhe entra
+num caderno, sai como `::warning::` na aba Actions, e a rodada segue: a
+varredura de segurança ainda recupera o evento pelas datas do próprio
+registro. O que se perde é a precisão dos dias intermediários, não o evento.
+No log, `FALHOU` e `0 sessões` são linhas diferentes — é o único lugar onde a
+diferença aparece depois.
+
+### 11.2 As três travas que o conserto exigiu
+
+Tolerar é o avesso do defeito antigo, e tolerar calado é o pecado deste
+pipeline. Então:
+
+1. **Mais de 10% dos dias perdidos aborta na hora** (`FRACAO_DIAS_FALHOS`),
+   dentro do laço. Portal fora não é tropeço, e insistir nos 60 dias gastaria
+   horas para abortar no fim — ou estouraria o job.
+2. **Varredura de segurança sem a primeira página aborta.** É ela que
+   recupera o que o filtro de data omite (§6.3); sem ela a coleta sai com
+   buracos invisíveis. Da segunda página em diante, o que já veio vale.
+3. **Dia perdido + varredura truncada abortam juntos.** Uma cobre a outra; as
+   duas faltando, ninguém responde por aquele pedaço da janela.
+
+`carregar_unidades()` **continua fatal de propósito**: o nome da unidade é a
+única chave entre a atividade e a região, e sem o mapa a coleta inteira sai
+sem região e sem endereço. O que mudou ali foi só a paciência.
+
+### 11.3 Como isso foi verificado
+
+Catorze testes novos em `teste_extratores.py` (`PacienciaComOPortal` e
+`DiaQueNaoRespondeNaoDerrubaARodada`), sem rede e em milissegundos. **Doze
+deles falham quando rodados contra o `coletor.py` de antes do conserto** —
+foi assim que se confirmou que medem algo. Os dois que passam nas duas
+versões descrevem comportamento que já estava certo (desistir no fim, repetir
+403). A suíte vai a **114 testes**.
+
+### 11.4 O que fica pendente
+
+`detalhes.py` (`TENTATIVAS = 2`) e `extras.py` (`3`) têm a paciência ainda
+mais curta, mas **falham de outra forma**: devolvem `None` e seguem, então um
+portal instável não derruba a rodada — enche de buracos em silêncio, que é o
+defeito oposto. Não foram tocados aqui.
+
+Para ler o log de uma falha dessas é preciso **estar logado no GitHub**, mesmo
+em repositório público; a API anônima dá 403 e as *annotations* só dizem
+"Process completed with exit code 1". O que dá para ver sem login é a duração
+de cada passo, e ela basta para separar "desistiu na primeira requisição" de
+"coletou e a trava recusou".

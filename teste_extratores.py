@@ -20,6 +20,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import urllib.error
 
 import detalhes
 
@@ -401,6 +402,249 @@ class PisosDeVolume(unittest.TestCase):
         self.assertGreater(i_piso, 0, "coletor.main não confere o volume")
         self.assertLess(i_piso, i_grava,
                         "o piso precisa vir ANTES de gravar o arquivo")
+
+
+class _RelogioFalso:
+    """Entra no lugar de `time` dentro do coletor: anota em vez de dormir.
+
+    Sem isso cada teste de paciência levaria os 77 segundos de verdade.
+    """
+
+    def __init__(self):
+        self.dormiu = []
+
+    def sleep(self, s):
+        self.dormiu.append(s)
+
+    def time(self):
+        return 0.0
+
+
+class PacienciaComOPortal(unittest.TestCase):
+    """O portal cai e volta, e a coleta desistia em 6 segundos.
+
+    Em 31/10/2026 as duas rodadas do dia morreram no mesmo passo, sem
+    coletar um único dia: eram 3 tentativas esperando 2s e 4s, e a primeira
+    requisição — a das unidades, antes de qualquer data — falhou as três. Na
+    manhã seguinte a fonte respondia inteira, com as 43 unidades e os 2.971
+    itens no lugar. Não faltou código: faltou paciência.
+
+    O outro lado da moeda é insistir onde não há o que esperar. 404 não vira
+    200 na sexta tentativa, e repetir gasta 77 segundos para chegar na mesma
+    resposta — além de fazer "falhou 6 vezes" parecer instabilidade quando a
+    verdade é que a URL mudou.
+    """
+
+    def setUp(self):
+        import coletor
+        self.coletor = coletor
+        self.relogio = _RelogioFalso()
+        self.urlopen = coletor.urllib.request.urlopen
+        coletor.time = self.relogio
+
+    def tearDown(self):
+        import time
+        self.coletor.urllib.request.urlopen = self.urlopen
+        self.coletor.time = time
+
+    def fila(self, *respostas):
+        """Põe uma fila no lugar de `urlopen`.
+
+        Cada item é um erro a levantar ou um corpo a devolver. O que sobrar na
+        fila é tentativa que não aconteceu — e isso também é asserção.
+        """
+        restante = list(respostas)
+        self.pedidos = []
+
+        class _Corpo:
+            def __init__(self, texto):
+                self.texto = texto
+
+            def read(self):
+                return self.texto.encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def falso_urlopen(req, timeout=None):
+            self.pedidos.append(req.full_url)
+            item = restante.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return _Corpo(item)
+
+        self.coletor.urllib.request.urlopen = falso_urlopen
+        self.restante = restante
+
+    @staticmethod
+    def http(codigo, cabecalhos=None):
+        return urllib.error.HTTPError("https://www.sescsp.org.br/x", codigo,
+                                      "erro", cabecalhos or {}, None)
+
+    def test_sobrevive_a_cinco_tropecos(self):
+        """O caso de 31/10: a fonte está lá, só não atendeu de primeira."""
+        caiu = urllib.error.URLError("conexão recusada")
+        self.fila(caiu, caiu, caiu, caiu, caiu, '{"ok": true}')
+        self.assertEqual(self.coletor.buscar("https://x/y"), {"ok": True})
+        self.assertEqual(len(self.pedidos), 6)
+        self.assertEqual(self.relogio.dormiu, list(self.coletor.ESPERAS))
+
+    def test_a_paciencia_e_de_pelo_menos_um_minuto(self):
+        """6 segundos foi o número que perdeu dois dias de coleta."""
+        self.assertGreaterEqual(
+            sum(self.coletor.ESPERAS), 60,
+            "com menos de um minuto de espera somada a rodada volta a morrer "
+            "no primeiro piscar do portal")
+
+    def test_cada_tentativa_tem_a_sua_espera(self):
+        """`espera_de` indexa `ESPERAS` pela tentativa.
+
+        Subir `TENTATIVAS` sem esticar `ESPERAS` não quebra nada à vista: a
+        última espera passa a ser reusada em silêncio, e a paciência anunciada
+        no comentário deixa de ser a real.
+        """
+        self.assertEqual(self.coletor.TENTATIVAS, len(self.coletor.ESPERAS) + 1)
+
+    def test_desiste_e_levanta_depois_da_ultima(self):
+        caiu = urllib.error.URLError("conexão recusada")
+        self.fila(*[caiu] * self.coletor.TENTATIVAS)
+        with self.assertRaises(urllib.error.URLError):
+            self.coletor.buscar("https://x/y")
+        self.assertEqual(len(self.pedidos), self.coletor.TENTATIVAS)
+
+    def test_nao_insiste_em_404(self):
+        self.fila(self.http(404), '{"nunca": "chamado"}')
+        with self.assertRaises(urllib.error.HTTPError):
+            self.coletor.buscar("https://x/y")
+        self.assertEqual(len(self.pedidos), 1)
+        self.assertEqual(self.relogio.dormiu, [])
+
+    def test_insiste_no_403_do_waf(self):
+        """O portal barra com 403 o tráfego que achou suspeito, e desbarra."""
+        self.fila(self.http(403), '{"ok": true}')
+        self.assertEqual(self.coletor.buscar("https://x/y"), {"ok": True})
+        self.assertEqual(len(self.pedidos), 2)
+
+    def test_pagina_de_manutencao_conta_como_falha(self):
+        """A página do WAF chega com HTTP 200 e HTML dentro.
+
+        Antes, isso levantava `JSONDecodeError` fora do `except` e derrubava a
+        rodada na primeira — sem repetir e sem dizer que era a fonte.
+        """
+        self.fila("<html>em manutenção</html>", '{"ok": true}')
+        self.assertEqual(self.coletor.buscar("https://x/y"), {"ok": True})
+        self.assertEqual(len(self.pedidos), 2)
+
+    def test_obedece_o_retry_after(self):
+        self.fila(self.http(429, {"Retry-After": "7"}), '{"ok": true}')
+        self.coletor.buscar("https://x/y")
+        self.assertEqual(self.relogio.dormiu, [7])
+
+    def test_retry_after_absurdo_nao_para_a_rodada(self):
+        """Meia hora de espera estoura o job; o teto devolve o nosso palpite."""
+        self.fila(self.http(503, {"Retry-After": "3600"}), '{"ok": true}')
+        self.coletor.buscar("https://x/y")
+        self.assertEqual(self.relogio.dormiu, [self.coletor.ESPERAS[0]])
+
+
+class DiaQueNaoRespondeNaoDerrubaARodada(unittest.TestCase):
+    """Um dia perdido custava os outros 59.
+
+    A coleta é uma consulta por dia, e qualquer uma delas levantando matava a
+    rodada inteira: nada gravado, nenhuma novidade marcada, app com a base de
+    ontem. Agora o dia vai para um caderno e a varredura de segurança ainda
+    recupera o evento pelas datas do próprio registro — o que se perde é a
+    precisão dos dias intermediários, não o evento.
+
+    O risco do conserto é o avesso do defeito: tolerar demais, calado. As
+    travas são a outra metade do teste.
+    """
+
+    # Janela de 20 dias: `FRACAO_DIAS_FALHOS` dá teto 2, então o terceiro dia
+    # perdido é o que aborta.
+    DE = (2026, 9, 9)
+    ATE = (2026, 9, 28)
+
+    def rodar(self, falhar_em=(), falhar_varredura=0):
+        """Roda `coletor.coletar` na janela curta, sem rede.
+
+        `falhar_em` são os dias (ISO) cuja consulta levanta; `falhar_varredura`
+        é a página da varredura geral que levanta. Devolve (lista, log).
+        """
+        import contextlib
+        import copy
+        import coletor
+        from datetime import date
+
+        caiu = urllib.error.URLError("conexão recusada")
+        pagina = {"geral": 0}
+
+        def falso_buscar(url, tentativa=1):
+            if "unidades-atividades" in url:
+                return [{"name": "Pompeia", "description": "Capital"}]
+            if "data_inicial" in url:
+                if any("data_inicial=%s" % d in url for d in falhar_em):
+                    raise caiu
+                return {"atividade": [], "total": {"value": 0}}
+            pagina["geral"] += 1
+            if pagina["geral"] == falhar_varredura:
+                raise caiu
+            # `total` alto de propósito: a varredura pede a página 2, que é
+            # onde se testa parar no meio.
+            if pagina["geral"] > 1:
+                return {"atividade": [], "total": {"value": 900}}
+            sentinela = copy.deepcopy(SENTINELA_TURISMO)
+            sentinela["tipos_linguagens"] = [{"titulo": coletor.CAT_TURISMO}]
+            return {"atividade": [sentinela], "total": {"value": 900}}
+
+        original, pausa = coletor.buscar, coletor.PAUSA
+        coletor.buscar, coletor.PAUSA = falso_buscar, 0
+        log = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(log):
+                lista, _ = coletor.coletar(date(*self.DE), date(*self.ATE),
+                                           set(coletor.REGIOES_VALIDAS))
+            return lista, log.getvalue()
+        finally:
+            coletor.buscar, coletor.PAUSA = original, pausa
+
+    def test_dia_falho_segue_e_a_varredura_recupera(self):
+        """O evento do dia perdido volta pela rede de segurança."""
+        lista, log = self.rodar(falhar_em=("2026-09-15",))
+        self.assertEqual(so(lista, "Passeio")["dias"], ["2026-09-15"])
+        self.assertIn("FALHOU", log,
+                      "'0 sessões' e 'não respondeu' não podem sair iguais")
+        self.assertIn("::warning::", log,
+                      "dia perdido sem aviso na aba Actions é perda calada")
+        self.assertIn("2026-09-15", log)
+
+    def test_dias_demais_abortam_na_hora(self):
+        """Portal fora não é tropeço — e insistir nos 60 dias gastaria horas."""
+        with self.assertRaises(SystemExit) as ctx:
+            self.rodar(falhar_em=("2026-09-10", "2026-09-11", "2026-09-12"))
+        self.assertIn("não responderam", str(ctx.exception))
+        self.assertIn("Nada foi gravado", str(ctx.exception))
+
+    def test_varredura_sem_a_primeira_pagina_aborta(self):
+        """Sem a varredura não há rede nenhuma, e os buracos ficam invisíveis."""
+        with self.assertRaises(SystemExit) as ctx:
+            self.rodar(falhar_varredura=1)
+        self.assertIn("primeira página", str(ctx.exception))
+
+    def test_varredura_truncada_sozinha_passa(self):
+        """Os dias responderam todos; o que já veio da varredura vale."""
+        lista, log = self.rodar(falhar_varredura=2)
+        self.assertEqual(so(lista, "Passeio")["dias"], ["2026-09-15"])
+        self.assertIn("::warning::", log)
+
+    def test_dia_falho_mais_varredura_truncada_abortam(self):
+        """Uma cobre a outra; as duas juntas não cobrem ninguém."""
+        with self.assertRaises(SystemExit) as ctx:
+            self.rodar(falhar_em=("2026-09-15",), falhar_varredura=2)
+        self.assertIn("cobre a outra", str(ctx.exception))
 
 
 class FaltantesNaoCongelaPreco(unittest.TestCase):
