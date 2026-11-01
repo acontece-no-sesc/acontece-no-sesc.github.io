@@ -647,6 +647,201 @@ class DiaQueNaoRespondeNaoDerrubaARodada(unittest.TestCase):
         self.assertIn("cobre a outra", str(ctx.exception))
 
 
+class PacienciaRepartidaEntreOsTres(unittest.TestCase):
+    """A paciência não pode ser a mesma nos três, e a política tem de ser.
+
+    Quem decide QUAIS erros vale repetir — e como ler o `Retry-After` — é um
+    lugar só, `coletor`. Já quantas vezes insistir depende de quantas URLs o
+    script bate: 77 segundos por URL cabem nas ~70 do coletor e comeriam o
+    job nas ~3.000 de `detalhes.py`.
+    """
+
+    def modulos(self):
+        import coletor
+        import detalhes
+        import extras
+        return coletor, detalhes, extras
+
+    def test_cada_escada_tem_o_seu_tamanho(self):
+        """Subir TENTATIVAS sem esticar ESPERAS reusa a última em silêncio."""
+        for m in self.modulos():
+            self.assertEqual(m.TENTATIVAS, len(m.ESPERAS) + 1,
+                             "%s: escada e número de tentativas discordam"
+                             % m.__name__)
+
+    def test_quem_bate_em_mais_urls_espera_menos(self):
+        coletor, detalhes, extras = self.modulos()
+        self.assertGreater(sum(coletor.ESPERAS), sum(extras.ESPERAS))
+        self.assertGreater(sum(extras.ESPERAS), sum(detalhes.ESPERAS))
+
+    def test_a_politica_de_erro_mora_num_lugar_so(self):
+        """Três cópias da lista de erros repetíveis, e duas envelhecem."""
+        for nome in ("detalhes.py", "extras.py"):
+            fonte = ler_fonte(nome)
+            self.assertIn("coletor.repetivel", fonte,
+                          "%s decide sozinho o que vale repetir" % nome)
+            self.assertIn("coletor.espera_de", fonte)
+            self.assertNotIn("2 ** tentativa", fonte,
+                             "%s voltou a calcular a espera por conta" % nome)
+            self.assertNotIn("REPETIVEIS =", fonte,
+                             "%s tem a sua própria lista de códigos" % nome)
+
+
+class FalhaDoPortalContadaEmDetalhes(unittest.TestCase):
+    """`detalhes.buscar` devolve None, e isso é contrato — `sorteios.py`
+    conta com ele, e o evento sem resposta tem de ficar com o que já tinha em
+    vez de derrubar uma passada de 70 minutos.
+
+    O que não era contrato: o None de "não respondeu" ser idêntico ao None de
+    "respondeu e não tem nada aqui", com os contadores do fim só sabendo somar
+    acerto. Meia conferência saía carimbada como conferência, e é assim que um
+    resultado de sorteio "não sai" para quem está com o código na mão.
+    """
+
+    def setUp(self):
+        import detalhes
+        self.d = detalhes
+        self.urlopen = detalhes.urllib.request.urlopen
+        self.pausa = detalhes.PAUSA
+        detalhes.PAUSA = 0
+        del detalhes.FALHAS[:]
+        detalhes.GASTO[0] = 0.0
+        self.dormiu = []
+        self.sleep = detalhes.time.sleep
+        detalhes.time.sleep = self.dormiu.append
+
+    def tearDown(self):
+        self.d.urllib.request.urlopen = self.urlopen
+        self.d.time.sleep = self.sleep
+        self.d.PAUSA = self.pausa
+        del self.d.FALHAS[:]
+        self.d.GASTO[0] = 0.0
+
+    def urlopen_que(self, *respostas):
+        fila, self.chamadas = list(respostas), []
+
+        class _Corpo:
+            def __init__(self, texto):
+                self.texto = texto
+
+            def read(self):
+                return self.texto.encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def falso(req, timeout=None):
+            self.chamadas.append(req.full_url)
+            item = fila.pop(0) if fila else respostas[-1]
+            if isinstance(item, Exception):
+                raise item
+            return _Corpo(item)
+
+        self.d.urllib.request.urlopen = falso
+
+    def test_pagina_perdida_entra_no_caderno(self):
+        self.urlopen_que(urllib.error.URLError("recusada"))
+        self.assertIsNone(self.d.buscar("https://x/evento"))
+        self.assertEqual(self.d.FALHAS, ["https://x/evento"])
+        self.assertEqual(len(self.chamadas), self.d.TENTATIVAS)
+
+    def test_resposta_boa_nao_conta_falha(self):
+        self.urlopen_que("<html>ok</html>")
+        self.assertEqual(self.d.buscar("https://x/evento"), "<html>ok</html>")
+        self.assertEqual(self.d.FALHAS, [])
+
+    def test_orcamento_de_espera_para_de_insistir(self):
+        """Sem teto, 300 tropeços dormiriam mais que o job inteiro dura."""
+        self.d.GASTO[0] = self.d.ORCAMENTO_ESPERA
+        self.urlopen_que(urllib.error.URLError("recusada"))
+        self.assertIsNone(self.d.buscar("https://x/evento"))
+        self.assertEqual(len(self.chamadas), 1, "insistiu com o orçamento gasto")
+        self.assertEqual(self.dormiu, [])
+        self.assertEqual(len(self.d.FALHAS), 1, "desistir sem contar é o defeito")
+
+    def test_bug_nosso_nao_passa_por_portal_fora(self):
+        """Era `except Exception`: um TypeError nosso virava "não respondeu".
+
+        O pior tipo de silêncio deste pipeline — o defeito some dentro da
+        estatística de falha de rede e a passada termina com sucesso.
+        """
+        self.urlopen_que(RuntimeError("isto é bug, não é rede"))
+        with self.assertRaises(RuntimeError):
+            self.d.buscar("https://x/evento")
+        self.assertEqual(self.d.FALHAS, [])
+
+    def test_a_trava_vem_antes_do_carimbo(self):
+        """`enriquecidoEm` é o "última conferência" que o app mostra.
+
+        Escrevê-lo e só então conferir se a passada valeu seria afirmar
+        primeiro e verificar depois.
+        """
+        fonte = ler_fonte("detalhes.py")
+        i_trava = fonte.find("ABORTADO: %d de %d páginas não responderam")
+        i_carimbo = fonte.rfind('d["enriquecidoEm"]')
+        self.assertGreater(i_trava, 0, "detalhes.py não tem trava de falhas")
+        self.assertLess(i_trava, i_carimbo,
+                        "a trava precisa vir ANTES do carimbo final")
+
+
+class VarreduraDeFotosNaoConfundeFalhaComFim(unittest.TestCase):
+    """O buraco mais calado dos três, achado lendo `extras.py`.
+
+    A varredura de fotos para na página vazia — tem de ser assim, porque a
+    listagem devolve 299 numa página cheia (§2.1). Mas a página que não
+    respondia chegava como None, virava "0 itens" e o laço lia fim de lista:
+    um tropeço do portal na página 3 encerrava a varredura, e o backfill
+    gravava um terço das fotos com cara de inteiro.
+    """
+
+    def rodar(self, respostas):
+        """`coletar_extras` sobre uma fila de respostas da varredura geral."""
+        import contextlib
+        import extras
+
+        fila = list(respostas)
+        original, pausa = extras.json_de, extras.PAUSA
+        extras.json_de, extras.PAUSA = lambda url: fila.pop(0), 0
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return extras.coletar_extras([])
+        finally:
+            extras.json_de, extras.PAUSA = original, pausa
+
+    def test_pagina_que_nao_responde_aborta(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self.rodar([None])
+        self.assertIn("fim de lista", str(ctx.exception))
+
+    def test_o_fim_continua_sendo_a_pagina_vazia(self):
+        achados = self.rodar([{"atividade": [], "total": {"value": 0}}])
+        self.assertEqual(achados, {})
+
+    def test_falha_depois_da_primeira_pagina_tambem_aborta(self):
+        """Meia varredura é meio backfill, e ninguém veria a diferença."""
+        cheia = {"atividade": [{"id": 1, "imagem": "https://x/a/f.jpg",
+                                "imagens": {"medium": {"file": "f-300x200.jpg"}}}]}
+        with self.assertRaises(SystemExit):
+            self.rodar([cheia, None])
+
+    def test_sem_a_lista_de_unidades_a_trava_nao_se_desliga(self):
+        """`esperadas = 0` desligava a trava dos 90% justamente no pior caso.
+
+        Com a lista de unidades vazia não há página para raspar, nenhum
+        endereço entra, e `if esperadas and …` deixava o arquivo ser gravado
+        assim — o .ics de 486 eventos sem local, que é a regressão que a §2.2
+        diz ter sido corrigida.
+        """
+        fonte = ler_fonte("extras.py")
+        i_guarda = fonte.find("if not api and not so_fotos:")
+        i_trava = fonte.find("if esperadas and len(ends)")
+        self.assertGreater(i_guarda, 0, "extras.py não confere a lista vazia")
+        self.assertLess(i_guarda, i_trava)
+
+
 class FaltantesNaoCongelaPreco(unittest.TestCase):
     """`--faltantes` é sobre descrição, e só.
 

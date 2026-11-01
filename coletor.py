@@ -98,9 +98,15 @@ def repetivel(e):
     return True
 
 
-def espera_de(e, tentativa):
-    """Quanto dormir antes da próxima tentativa."""
-    padrao = ESPERAS[min(tentativa, len(ESPERAS)) - 1]
+def espera_de(e, tentativa, esperas=ESPERAS):
+    """Quanto dormir antes da próxima tentativa.
+
+    A escada é argumento porque a paciência não pode ser a mesma nos três
+    scripts: aqui são ~70 URLs e 77s cada um cabe; `detalhes.py` bate em
+    ~3.000 e o mesmo número comeria o job inteiro. O que não varia — quais
+    erros valem repetir, como ler o `Retry-After` — mora aqui, num lugar só.
+    """
+    padrao = esperas[min(tentativa, len(esperas)) - 1]
     if isinstance(e, urllib.error.HTTPError):
         # 429 e 503 costumam vir com Retry-After. Obedecer é mais educado e
         # mais eficaz que o nosso palpite — com teto, porque o cabeçalho pode

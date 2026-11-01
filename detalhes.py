@@ -44,7 +44,37 @@ import coletor          # o carimbo de hora sai daqui, em horário de Brasília
 BILHETERIA = "https://portal.sescsp.org.br/bilheteria/atividade.action?idAtividade=%s"
 PAUSA = 0.25
 TIMEOUT = 30
-TENTATIVAS = 2
+
+# Paciência mais curta que a do coletor, de propósito. Lá são ~70 URLs e 77
+# segundos de espera por cada uma cabem folgados; aqui são ~3.000 e a passada
+# já leva 70 minutos dos 180 do job. Com esta escada, uma falha custa no
+# máximo 17 segundos. A política de QUAIS erros vale repetir, e de como ler o
+# `Retry-After`, é a mesma e mora em `coletor` — eram 2 tentativas e um
+# `except Exception` que engolia bug junto com portal fora.
+TENTATIVAS = 4
+ESPERAS = (2, 5, 10)
+
+# Teto de espera acumulada na passada inteira. Sem ele a aritmética vira
+# contra nós: 300 páginas tropeçando a 17s cada uma são 85 minutos de sono em
+# cima dos 70 de trabalho, e o job morre no limite sem publicar nada. Gasto o
+# orçamento, `buscar` para de insistir e passa a devolver None na primeira —
+# a passada termina, incompleta e dizendo que está.
+ORCAMENTO_ESPERA = 900
+
+# O portal que não responde é perda, e aqui ela era calada duas vezes: o
+# `None` de "não respondeu" é o mesmo `None` de "respondeu e não tem nada
+# aqui", e os contadores do fim só sabiam somar acerto. O evento fica com o
+# que já tinha — é o certo, melhor que derrubar a passada —, mas agora a
+# perda tem nome, número e trava.
+FALHAS = []
+GASTO = [0.0]
+
+# Acima disto a passada não é uma conferência, e carimbar `enriquecidoEm`
+# viraria o app prometendo o que não fez. O piso absoluto protege as passadas
+# curtas (`--max 30`), onde um décimo é um punhado de páginas.
+FRACAO_FALHAS = 0.1
+PISO_FALHAS = 25
+
 UA = "agenda-sesc-prototipo/1.0 (agregador de programacao publica; uso pessoal)"
 
 RE_TAG = re.compile(r"<[^>]+>")
@@ -99,6 +129,12 @@ def cortar_cromo(texto):
 
 
 def buscar(url, json_esperado=False, tentativa=1):
+    """A página, ou `None` se o portal não respondeu.
+
+    Devolver `None` é contrato: `sorteios.py` conta com ele, e um evento sem
+    resposta tem de ficar com o que já tinha em vez de derrubar a passada
+    inteira. O que não era contrato era a perda sair sem registro.
+    """
     req = urllib.request.Request(url, headers={
         "User-Agent": UA,
         "Accept": "application/json" if json_esperado else "text/html",
@@ -107,10 +143,15 @@ def buscar(url, json_esperado=False, tentativa=1):
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             bruto = r.read().decode("utf-8", "replace")
         return json.loads(bruto) if json_esperado else bruto
-    except Exception:
-        if tentativa >= TENTATIVAS:
+    except coletor.FALHA_DE_REDE as e:
+        acabou = (tentativa >= TENTATIVAS or not coletor.repetivel(e)
+                  or GASTO[0] >= ORCAMENTO_ESPERA)
+        if acabou:
+            FALHAS.append(url)
             return None
-        time.sleep(2 ** tentativa)
+        espera = coletor.espera_de(e, tentativa, ESPERAS)
+        GASTO[0] += espera
+        time.sleep(espera)
         return buscar(url, json_esperado, tentativa + 1)
 
 
@@ -762,13 +803,36 @@ def main():
                 json.dump(d, f, ensure_ascii=False, separators=(",", ":"))
         time.sleep(PAUSA)
 
+    # `enriquecidoEm` é o que o app mostra como "última conferência", e isso é
+    # uma afirmação. Metade das páginas sem resposta e o carimbo mesmo assim é
+    # o app prometendo o que não fez — e é exatamente assim que um resultado
+    # de sorteio "não sai" para quem está esperando com o código na mão.
+    tentadas = len(com_java) + sum(1 for e in quer_html if e.get("link"))
+    if FALHAS:
+        print("::warning::%d de %d páginas não responderam depois de %d "
+              "tentativas. Esses eventos ficaram com o preço, a descrição e o "
+              "sorteio da passada anterior."
+              % (len(FALHAS), tentadas, TENTATIVAS))
+        if GASTO[0] >= ORCAMENTO_ESPERA:
+            print("::warning::Orçamento de espera (%ds) esgotado no caminho: "
+                  "daí em diante a passada deixou de insistir, para não levar "
+                  "o job inteiro esperando." % ORCAMENTO_ESPERA)
+        teto = max(PISO_FALHAS, int(tentadas * FRACAO_FALHAS))
+        if len(FALHAS) > teto:
+            raise SystemExit(
+                "ABORTADO: %d de %d páginas não responderam (teto: %d). Esta "
+                "passada não é uma conferência, e carimbá-la como tal faria o "
+                "app afirmar preço e sorteio que ninguém leu hoje. Nada foi "
+                "publicado — o site continua com a base anterior."
+                % (len(FALHAS), tentadas, teto))
+
     d["enriquecidoEm"] = coletor.agora_br().isoformat(timespec="seconds")
     with open(args.dados, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, separators=(",", ":"))
 
-    print("\nPronto em %.0fs · %.0f KB · preços=%d sessões=%d vendas=%d descrições=%d inscrições=%d sorteios=%d"
+    print("\nPronto em %.0fs · %.0f KB · preços=%d sessões=%d vendas=%d descrições=%d inscrições=%d sorteios=%d · sem resposta=%d"
           % (time.time() - inicio, os.path.getsize(args.dados) / 1024,
-             n_preco, n_sessao, n_venda, n_desc, n_insc, n_sorteio))
+             n_preco, n_sessao, n_venda, n_desc, n_insc, n_sorteio, len(FALHAS)))
 
 
 if __name__ == "__main__":

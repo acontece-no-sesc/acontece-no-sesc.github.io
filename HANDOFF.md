@@ -963,19 +963,86 @@ sem região e sem endereço. O que mudou ali foi só a paciência.
 
 ### 11.3 Como isso foi verificado
 
-Catorze testes novos em `teste_extratores.py` (`PacienciaComOPortal` e
-`DiaQueNaoRespondeNaoDerrubaARodada`), sem rede e em milissegundos. **Doze
-deles falham quando rodados contra o `coletor.py` de antes do conserto** —
-foi assim que se confirmou que medem algo. Os dois que passam nas duas
-versões descrevem comportamento que já estava certo (desistir no fim, repetir
-403). A suíte vai a **114 testes**.
+Vinte e seis testes novos em `teste_extratores.py`, sem rede e em
+milissegundos — catorze do coletor (`PacienciaComOPortal` e
+`DiaQueNaoRespondeNaoDerrubaARodada`) e doze dos outros dois
+(`PacienciaRepartidaEntreOsTres`, `FalhaDoPortalContadaEmDetalhes`,
+`VarreduraDeFotosNaoConfundeFalhaComFim`).
 
-### 11.4 O que fica pendente
+**O que vale neles é que a maioria falha quando rodada contra o código de
+antes do conserto**: 12 dos 14 e 9 dos 12. O método é barato e deveria ser o
+padrão aqui — carregar a versão anterior do arquivo com
+`importlib.util.spec_from_file_location`, injetá-la em `sys.modules` e rodar
+só as classes novas. Os que passam nas duas versões descrevem comportamento
+que já estava certo (desistir no fim, repetir 403, o fim da varredura ser a
+página vazia) ou leem a fonte do disco, que é sempre a nova.
 
-`detalhes.py` (`TENTATIVAS = 2`) e `extras.py` (`3`) têm a paciência ainda
-mais curta, mas **falham de outra forma**: devolvem `None` e seguem, então um
-portal instável não derruba a rodada — enche de buracos em silêncio, que é o
-defeito oposto. Não foram tocados aqui.
+A suíte vai a **126 testes**. Fora isso, verificação ao vivo contra o portal:
+coleta de 5 dias em 61s com 1.595 eventos, `detalhes.py --max 8 --html` com
+`sem resposta=0`, e os buscadores do `extras` devolvendo as 43 unidades, três
+endereços raspados e um 404 que **não** foi repetido.
+
+### 11.4 A paciência é repartida; a política é uma
+
+`detalhes.py` e `extras.py` falham de outra forma: devolvem `None` e seguem,
+então portal instável não derruba a rodada — enche de buracos em silêncio, que
+é o defeito oposto. O `None` é contrato (`sorteios.py` conta com ele, e um
+evento sem resposta tem de ficar com o que já tinha em vez de custar uma
+passada de 70 minutos). O que não era contrato era a perda sair sem registro.
+
+**A paciência não pode ser a mesma nos três, porque o número de URLs não é.**
+77 segundos por URL cabem nas ~70 do coletor e comeriam o job nas ~3.000 de
+`detalhes.py`. Então a escada é de cada um, e quem bate em mais URLs espera
+menos — há teste que recusa a inversão:
+
+| script | URLs | tentativas | escada | pior caso por URL |
+|---|---|---|---|---|
+| `coletor.py` | ~70 | 6 | 2, 5, 10, 20, 40 | 77s |
+| `extras.py` | ~115 | 5 | 2, 5, 10, 20 | 37s |
+| `detalhes.py` | ~3.000 | 4 | 2, 5, 10 | 17s |
+
+O que **não** varia mora em `coletor`, num lugar só: quais códigos vale
+repetir, como ler o `Retry-After`, o que conta como falha de rede. Há teste
+que recusa uma segunda cópia dessa lista nos outros dois arquivos — a §6.7 já
+ensinou o preço de duas cópias da mesma regra.
+
+Três coisas a mais em `detalhes.py`:
+
+* **O `except Exception` saiu.** Ele engolia bug nosso junto com portal fora:
+  um `TypeError` virava "não respondeu", entrava na estatística de rede e a
+  passada terminava com sucesso. Agora só falha de rede é capturada.
+* **Orçamento de espera** (`ORCAMENTO_ESPERA`, 900s). A aritmética virava
+  contra nós: 300 páginas tropeçando a 17s cada uma são 85 minutos de sono em
+  cima dos 70 de trabalho, e o job morreria no limite sem publicar. Gasto o
+  orçamento, `buscar` para de insistir — a passada termina incompleta **e
+  dizendo que está**.
+* **Trava antes do carimbo.** `enriquecidoEm` é o que o app mostra como
+  "última conferência", e isso é uma afirmação. Acima de 10% de páginas sem
+  resposta (piso de 25) a passada aborta em vez de carimbar: é exatamente
+  assim que um resultado de sorteio "não sai" para quem está com o código na
+  mão. O número de perdas agora sai na linha final, como `sem resposta=N`.
+
+### 11.5 Dois buracos calados que apareceram lendo o `extras.py`
+
+Nenhum dos dois tinha a ver com paciência. Apareceram porque, para contar as
+falhas, foi preciso perguntar o que o código fazia com elas.
+
+1. **A varredura de fotos confundia falha com fim de lista.** Ela para na
+   página vazia — tem de ser assim, porque uma página cheia devolve 299 e não
+   300 (§2.1). Mas a página que não respondia chegava como `None`, virava "0
+   itens", e o laço lia fim de lista: um tropeço na página 3 encerrava a
+   varredura e o backfill gravava um terço das fotos com cara de inteiro. É a
+   armadilha da §2.1 de cabeça para baixo.
+2. **A trava dos 90% se desligava sozinha no pior caso.** Se
+   `/unidades-atividades` não respondesse, `api` ficava vazia, `esperadas`
+   virava 0, e o `if esperadas and …` deixava passar justamente o caso de
+   **nenhum** endereço — o `.ics` de 486 eventos sem local, que é a regressão
+   que a §2.2 diz ter sido corrigida.
+
+E no relatório das unidades, "SEM RESPOSTA" agora é diferente de "SEM
+ENDEREÇO": pedem providências diferentes e chegavam iguais.
+
+### 11.6 Como ler o log de uma falha dessas
 
 Para ler o log de uma falha dessas é preciso **estar logado no GitHub**, mesmo
 em repositório público; a API anônima dá 403 e as *annotations* só dizem
