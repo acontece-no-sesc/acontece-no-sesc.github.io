@@ -40,6 +40,11 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # O endereço do portão é segredo porque o Worker é de graça e a cota é
+      # nossa. Vindo de `secrets`, o log o mascara sozinho.
+      PORTAO: ${{ secrets.PORTAO_URL }}
+      CHAVE: ${{ secrets.PORTAO_TOKEN }}
     steps:
       - name: De onde este runner sai
         run: |
@@ -84,3 +89,35 @@ jobs:
           medir "unidade (HTML) · UA do coletor"   "$UA_NOSSO" "$UNIDADE"
           medir "unidade (HTML) · UA de navegador" "$UA_NAV"   "$UNIDADE"
           medir "bilheteria · UA do coletor"       "$UA_NOSSO" "$BILHETERIA"
+
+      # O teste que decide: o mesmo `www` que dá 403 daqui, pedido através do
+      # Worker da Cloudflare. Se passar, o pipeline inteiro pode voltar para o
+      # Actions — basta o coletor apontar `BASE` para o portão.
+      - name: Medir pelo portão
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          if [ -z "$PORTAO" ]; then
+            echo "SEM SEGREDO: PORTAO_URL não chegou ao runner."
+            echo "Ou o segredo não existe, ou é de organização sem acesso a este repositório."
+            exit 0
+          fi
+          UA='agenda-sesc-prototipo/1.0 (coletor de programacao publica; uso pessoal)'
+          pelo_portao () {
+            rotulo="$1"; caminho="$2"
+            code=$(curl -s -o corpo.txt -D cab.txt -w '%{http_code}' --max-time 40 \
+                   -A "$UA" -H "x-chave: $CHAVE" "$PORTAO$caminho")
+            bytes=$(wc -c < corpo.txt | tr -d ' ')
+            echo "=== $rotulo"
+            echo "    HTTP $code · ${bytes}B"
+            # Sem este cabeçalho a resposta não veio pelo Worker, e o teste
+            # não mediu o que pensa ter medido.
+            grep -i '^x-portao:' cab.txt | sed 's/^/    /' || echo "    SEM x-portao — não passou pelo portão"
+            if [ "$code" != "200" ]; then
+              head -c 200 corpo.txt | tr -d '\r' | sed 's/^/      /'
+              echo ""
+            fi
+            sleep 2
+          }
+          pelo_portao "unidades"        "/wp-json/wp/v1/unidades-atividades"
+          pelo_portao "listagem do dia" "/wp-json/wp/v1/atividades/filter?data_inicial=2026-11-06&data_final=2026-11-06&tipo=atividade&dinamico=true&ppp=300&page=1"
+          pelo_portao "unidade em HTML" "/unidades/14-bis/"
