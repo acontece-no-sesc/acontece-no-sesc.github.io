@@ -1,0 +1,13 @@
+# Configuração do portão. Publicar:  npx wrangler deploy
+#
+# `workers_dev = true` dá um endereço <name>.<subdominio>.workers.dev, que é o
+# suficiente para o teste e para o uso: não precisa de domínio próprio.
+#
+# Antes de usar para valer, feche o portão com uma chave:
+#   npx wrangler secret put TOKEN
+# Sem TOKEN configurado o Worker aceita qualquer pedido GET para o host fixo —
+# tolerável para medir, não para deixar de pé.
+name = "portao-sesc"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = true

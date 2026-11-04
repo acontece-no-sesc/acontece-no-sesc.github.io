@@ -32,8 +32,10 @@ FALHAS = []
 
 
 def _abrir(url, aceita, tentativa=1):
-    req = urllib.request.Request(url, headers={
-        "User-Agent": UA, "Accept": aceita, "Accept-Encoding": "gzip"})
+    destino, extra = coletor.pelo_portao(url)
+    cabecalhos = {"User-Agent": UA, "Accept": aceita, "Accept-Encoding": "gzip"}
+    cabecalhos.update(extra)
+    req = urllib.request.Request(destino, headers=cabecalhos)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             bruto = r.read()

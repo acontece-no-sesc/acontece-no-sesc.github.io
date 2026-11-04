@@ -1049,3 +1049,137 @@ em repositório público; a API anônima dá 403 e as *annotations* só dizem
 "Process completed with exit code 1". O que dá para ver sem login é a duração
 de cada passo, e ela basta para separar "desistiu na primeira requisição" de
 "coletou e a trava recusou".
+
+---
+
+## 12. A coleta sai do GitHub Actions — 01/11/2026
+
+O §11 consertou a paciência de um cliente que, descobriu-se depois, está
+**barrado**. O log das três falhas diz `HTTP 403 Forbidden` em todas as
+tentativas, e o run #118 datou o começo: ele coletou as 43 unidades e 19 dos
+60 dias — umas 40 requisições — e só então tomou o primeiro 403, em **31/10 às
+14:29 UTC**. Os dois runs seguintes tomaram 403 na primeira requisição.
+
+Uma sonda (`.github/workflows/sonda.yml`, disparo manual) mediu o que está
+sendo barrado:
+
+| variante | resultado |
+|---|---|
+| listagem · UA do coletor | 403, 919B, `server: CloudFront` |
+| listagem · UA de navegador | **mesmo 403, mesmos 919B** |
+| listagem · sem UA nenhum | **mesmo 403** |
+| página de unidade (HTML) | 403 |
+| bilheteria (`portal.sescsp.org.br`) | **500 do aplicativo** — host aberto |
+
+**Não é o User-Agent**, então não havia nada a disfarçar: a pergunta ética
+evaporou junto com a técnica. É o CloudFront recusando na borda, no host
+`www`. E **não é bloqueio de datacenter**: a mesma URL pedida de 14 nós do
+check-host.net, em 12 países, devolveu **200 em todos os 14**. A regra acerta
+as faixas do GitHub/Azure.
+
+Dois mistérios menores que caíram no caminho:
+
+* O workflow de sorteios "passava" porque a fila estava vazia —
+  `Sorteios sem lista: 0`, zero requisições ao portal. Não era álibi.
+* Como cada run sai de um IP diferente da Azure, limite por IP está
+  descartado: o #119 teria começado com orçamento novo e começou barrado.
+
+### 12.1 O plano B, que não precisou
+
+**Leia a §12.3 antes desta seção: o portão resolveu, e isto aqui virou plano
+B.** Fica registrado porque está testado e porque é o caminho no dia em que a
+Cloudflare fechar — a sonda diz quando.
+
+`vps/` tem o caminho inteiro, com o passo a passo em `vps/LEIAME.md`: a coleta
+e a publicação passam a rodar numa VPS pequena por cron, e o Pages passa a
+servir do branch `gh-pages`. Repositório, testes e código ficam onde estão.
+
+A publicação é **um commit órfão com `--force`**, então o branch tem sempre
+exatamente um commit e o repositório não cresce — é a mesma preocupação que
+tirou `dados/eventos.json` do histórico (§5), resolvida de outro jeito.
+
+Medido num repositório descartável, publicando três vezes:
+
+* `web/` são **43 MB e 10.451 arquivos** — muito mais do que os ~5 MB que eu
+  supunha, por causa do fan-out de `dados/desc/*.json`;
+* o remoto fica em **4,0 MB** (o JSON comprime muito);
+* a terceira publicação acrescentou **um único objeto**, o commit, e **zero**
+  byte de pacote. Então as 21 rodadas de uma tarde de sorteio não custam
+  banda nem tamanho — o que custava era republicar sem lista nova, e isso o
+  script já não faz.
+
+O que **não** foi verificado: `rodar.sh` e `rodar-sorteios.sh` não rodaram
+nunca. Usam `flock` e substituição de processo, que não existem no Git Bash do
+Windows; a primeira execução de verdade é na VPS. O que foi testado aqui é
+`publicar-no-pages.sh`, que é a parte com plumbing de git.
+
+### 12.2 O que ainda falta no código
+
+Tirar o **403 da lista dos repetíveis**. Hoje o coletor gasta 78 segundos
+(2+5+10+20+40) para bater seis vezes na mesma parede: bloqueio não é tropeço.
+E fazer todo `ABORTADO` sair como `::error::`, porque *annotations* são
+legíveis sem login e os logs não são — a investigação de 01/11 só foi possível
+depois de instalar o `gh` no meio dela.
+
+### 12.3 O portão — a coleta volta para o GitHub
+
+Antes de montar VPS, valia esgotar o GitHub. A sonda rodou nos **três** tipos
+de runner hospedado, que num repositório público têm minuto ilimitado:
+
+| runner | IP de saída | listagem |
+|---|---|---|
+| `ubuntu-latest` | 40.76.239.102 | 403 |
+| `windows-latest` | 158.23.93.162 | 403 |
+| `macos-latest` | 13.105.117.81 | 403 |
+
+O macOS era a esperança, porque historicamente não rodava na mesma
+infraestrutura. Não há configuração que mude o IP de saída de um runner
+hospedado, então o compute do GitHub estava esgotado.
+
+**O que não estava esgotado era o egresso.** A ideia que virou o jogo: o
+problema nunca foi onde o código roda, foi de onde a requisição sai. Um
+**Worker da Cloudflare** de quinze linhas (`portao/worker.js`) recebe o pedido
+e repassa ao portal. Plano gratuito: 100 mil requisições por dia, contra as
+~2.400 de duas rodadas. Nada para manter ligado, nada para pagar.
+
+Medido no **mesmo job do Actions, no mesmo minuto**:
+
+| mesma URL, mesmo runner | direto | pelo portão |
+|---|---|---|
+| `/wp-json/.../unidades-atividades` | 403 · 919B | **200** · 11.742B |
+| listagem do dia, com filtro de data | — | **200** · **1.070.556B** |
+| `/unidades/14-bis/` (HTML) | 403 · 919B | **200** · 60.570B |
+
+O cabeçalho `x-portao: sesc` em todas é o que faz a medição valer: sem ele, a
+resposta pode ter vindo do portal falando direto com quem mediu — e de casa
+dá 200 de qualquer jeito.
+
+**Do lado do código mudou pouco:** `coletor.pelo_portao(url)` reescreve o que
+for do `www` e acrescenta a chave; `detalhes.py` e `extras.py` chamam o mesmo
+ajudante. A troca mora **dentro do `buscar`**, não na montagem das URLs,
+porque metade delas não é montada por nós — `ev["link"]` vem absoluto da API,
+e trocar só onde montamos deixaria três mil páginas indo direto para a parede.
+A bilheteria não é desviada: `portal.sescsp.org.br` nunca foi barrado.
+
+Sem `PORTAO_URL` no ambiente **nada muda** — é o caminho de antes. É isso que
+mantém o teste local honesto e o que permite desligar o portão num dia.
+
+O portão **não é um proxy aberto**: destino fixo no código, só GET, e fechado
+com `TOKEN` (sem a chave responde 401). `PORTAO_URL` e `PORTAO_TOKEN` são
+secrets do repositório — o endereço fica fora do repositório público porque a
+cota do Worker é nossa.
+
+### 12.4 Uma correção e uma armadilha
+
+A §12 dizia que a regra acerta "a faixa da Microsoft". É mais largo: nesta
+última sonda um runner saiu por **3.42.157.193**, que não é faixa Microsoft, e
+levou 403 igual. Com os 14 nós de provedores pequenos que deram 200, o retrato
+honesto é uma regra de anti-abuso que cobre as nuvens grandes e não cobre
+hospedagem pequena.
+
+E a armadilha que custou duas idas e vindas: os secrets foram criados no
+repositório **errado** — `lmtrigo/agenda-sesc`, o antigo, que ainda existe como
+remote `antigo`. Existiam de verdade, só que onde nada roda. O sintoma foi
+`PORTAO_URL` chegando vazio ao runner, sem erro nenhum. De passagem: o GitHub
+**nunca** mostra um segredo de volta, nem ao dono — editar e ver o campo em
+branco é o comportamento normal, não um segredo vazio.

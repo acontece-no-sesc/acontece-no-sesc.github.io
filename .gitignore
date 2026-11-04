@@ -34,3 +34,21 @@ GoatCounter/
 # capturas de tela do app (regeraveis com divulgacao/capturar.py)
 divulgacao/telas/_*.png
 divulgacao/__pycache__/
+
+# Estado de execução da VPS (ver vps/LEIAME.md): log das rodadas, a trava do
+# flock e os arquivos de passagem da rodada leve. A VPS roda de um clone do
+# repositório, então sem isto `git status` lá vive sujo — e trinta dias de log
+# acabam entrando num commit distraído.
+vps/log/
+vps/.trava
+vps/.publicado.json
+vps/.saida-sorteios.txt
+
+# Cópias comprimidas da base, 30 dias, que na VPS fazem o papel do artefato
+# por execução da Action.
+dados/historico/
+
+# Cache local do wrangler: guarda id e nome da conta Cloudflare, e é refeito
+# sozinho a cada comando. Não é segredo de login (o token fica no config do
+# usuário), mas também não é coisa deste repositório.
+portao/.wrangler/

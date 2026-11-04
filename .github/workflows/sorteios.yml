@@ -41,6 +41,13 @@ jobs:
     timeout-minutes: 30
     outputs:
       novas: ${{ steps.ler.outputs.novas }}
+    # A rodada leve lê a PÁGINA do evento, que mora no www barrado — então
+    # ela precisa do portão tanto quanto a coleta grande (HANDOFF §12). Isto
+    # aqui passou despercebido por três dias porque a fila estava vazia: o
+    # workflow terminava verde sem fazer requisição nenhuma.
+    env:
+      PORTAO_URL: ${{ secrets.PORTAO_URL }}
+      PORTAO_TOKEN: ${{ secrets.PORTAO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 

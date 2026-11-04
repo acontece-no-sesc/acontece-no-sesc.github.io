@@ -68,9 +68,13 @@ ESPERAS = (2, 5, 10, 20, 40)   # ~77s de paciência somada, por URL
 # Erro de servidor e aperto de banda passam sozinhos; 404 e 400 não. Repetir
 # os segundos gasta 77 segundos para chegar na mesma resposta e ainda embaça o
 # diagnóstico: "falhou 6 vezes" se lê como instabilidade quando a URL mudou.
-# 403 fica na lista porque é com ele que o WAF do portal barra tráfego que
-# achou suspeito, e isso passa.
-REPETIVEIS = (403, 408, 425, 429, 500, 502, 503, 504)
+#
+# 403 estava nesta lista, e saiu quando se descobriu o que ele é aqui: não é
+# aperto passageiro, é a regra do CloudFront barrando a faixa de IP (§12). Em
+# 01/11/2026 a rodada gastou 78 segundos — 2+5+10+20+40 — para bater seis
+# vezes na mesma parede. Bloqueio não é tropeço: levanta na primeira, e a
+# mensagem diz que foi bloqueio.
+REPETIVEIS = (408, 425, 429, 500, 502, 503, 504)
 ESPERA_MAXIMA = 120           # teto para um Retry-After que o portal mande
 
 # O que "o portal não respondeu" significa em exceções. `URLError` é a mãe de
@@ -87,6 +91,52 @@ FRACAO_DIAS_FALHOS = 0.1
 UA = "agenda-sesc-prototipo/1.0 (coletor de programacao publica; uso pessoal)"
 
 REGIOES_VALIDAS = ("capital", "interior", "litoral")
+
+# ---------------------------------------------------------------- o portão
+# Desde 31/10/2026 o CloudFront do portal devolve 403 para as faixas das
+# nuvens grandes, e os três tipos de runner do GitHub saem de lá (§12). O
+# `portal.sescsp.org.br` da bilheteria continua aberto; só o `www` está
+# barrado. Então as requisições ao `www` passam a sair por um Worker da
+# Cloudflare — um repasse de quinze linhas, de graça, sem máquina ligada.
+#
+# Medido no mesmo job do Actions, no mesmo minuto: direto 403, pelo portão
+# 200, inclusive a página de listagem de 1,07 MB.
+#
+# Sem PORTAO_URL no ambiente nada muda: é exatamente o caminho de antes, que
+# é o que faz o teste local continuar valendo e o que faz o portão poder ser
+# desligado no dia em que o bloqueio cair (a sonda diz quando).
+PORTAO = (os.environ.get("PORTAO_URL") or "").rstrip("/")
+PORTAO_CHAVE = os.environ.get("PORTAO_TOKEN") or ""
+HOST_BARRADO = "www.sescsp.org.br"
+
+
+def pelo_portao(url):
+    """(endereço, cabeçalhos) — pelo portão quando ele existe.
+
+    A troca acontece aqui, e não na montagem das URLs, porque metade delas
+    não é montada por nós: `detalhes.py` busca `ev["link"]`, que vem absoluto
+    da própria API. Trocar só onde montamos deixaria três mil páginas indo
+    direto para a parede.
+    """
+    if not PORTAO:
+        return url, {}
+    partes = urllib.parse.urlsplit(url)
+    if partes.netloc.lower() != HOST_BARRADO:
+        return url, {}
+    destino = PORTAO + partes.path + (("?" + partes.query) if partes.query else "")
+    return destino, ({"x-chave": PORTAO_CHAVE} if PORTAO_CHAVE else {})
+
+
+def abortar(msg):
+    """Aborta dizendo por quê, em voz que a aba Actions escuta.
+
+    `raise SystemExit(msg)` escreve no stderr, e o stderr do passo só se lê
+    com login — foi o que custou a investigação de 01/11, feita por dedução a
+    partir da duração dos passos. `::error::` vira annotation, e annotation é
+    pública. O texto é o mesmo nos dois lugares.
+    """
+    print("::error::%s" % " ".join(msg.split()))
+    raise SystemExit(msg)
 
 
 def repetivel(e):
@@ -121,10 +171,10 @@ def espera_de(e, tentativa, esperas=ESPERAS):
 
 
 def buscar(url, tentativa=1):
-    req = urllib.request.Request(url, headers={
-        "User-Agent": UA,
-        "Accept": "application/json",
-    })
+    destino, extra = pelo_portao(url)
+    cabecalhos = {"User-Agent": UA, "Accept": "application/json"}
+    cabecalhos.update(extra)
+    req = urllib.request.Request(destino, headers=cabecalhos)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             return json.loads(r.read().decode("utf-8"))
@@ -156,7 +206,21 @@ def carregar_unidades():
     sem região e sem endereço. O que mudou é a paciência — era aqui, na
     primeira requisição da rodada, que 6 segundos de teimosia decidiam o dia.
     """
-    dados = buscar(API_UNIDADES)
+    try:
+        dados = buscar(API_UNIDADES)
+    except urllib.error.HTTPError as e:
+        # 403 aqui tem nome e endereço conhecidos, e dizê-lo poupa a
+        # investigação inteira de 01/11: naquele dia o log dizia só
+        # "HTTP Error 403: Forbidden", e o que ele significava levou um dia
+        # de medição para aparecer.
+        if e.code == 403:
+            abortar(
+                "ABORTADO: o portal recusou com 403 na primeira requisição. "
+                "Não é instabilidade: é a regra do CloudFront barrando a faixa "
+                "de IP (HANDOFF §12). Rodando no GitHub Actions, confira se "
+                "PORTAO_URL e PORTAO_TOKEN chegaram ao passo; o portão é o que "
+                "atravessa esse bloqueio. Nada foi gravado.")
+        raise
     mapa = {}
     for u in dados:
         nome = chave_unidade(u.get("name"))
@@ -382,7 +446,7 @@ def coletar(de, ate, regioes):
                       " (%s). A varredura de segurança ainda pode recuperar"
                       " os eventos, sem os dias intermediários." % (iso, TENTATIVAS, e))
                 if len(falhos) > teto_falhos:
-                    raise SystemExit(
+                    abortar(
                         "ABORTADO: %d dias de %d não responderam (teto: %d). "
                         "Isso não é tropeço do portal, é portal fora. Nada foi "
                         "gravado — a base anterior continua no lugar e a próxima "
@@ -440,7 +504,7 @@ def coletar(de, ate, regioes):
             # e os 23 programas contínuos). Seguir sem ela publicaria buracos
             # que ninguém veria.
             if page == 1:
-                raise SystemExit(
+                abortar(
                     "ABORTADO: a varredura de segurança não respondeu nem na "
                     "primeira página depois de %d tentativas (%s). É ela que "
                     "recupera o que o filtro de data deixa de fora; sem ela a "
@@ -502,7 +566,7 @@ def coletar(de, ate, regioes):
     # pedaço da janela — e aí o silêncio é exatamente o que este pipeline não
     # pode ter.
     if falhos and varredura_truncada:
-        raise SystemExit(
+        abortar(
             "ABORTADO: %d dia(s) não responderam (%s) E a varredura de "
             "segurança parou no meio. Uma coisa cobre a outra; as duas juntas, "
             "não. Nada foi gravado — a base anterior continua no lugar."
@@ -534,7 +598,7 @@ def coletar(de, ate, regioes):
     orfas = sorted({e["uni"] for e in lista
                     if e["uni"] != "—" and e["uni"] not in unidades})
     if orfas:
-        raise SystemExit(
+        abortar(
             "ABORTADO: %d nome(s) de unidade que não existem em "
             "/unidades-atividades: %s. Provavelmente uma unidade mudou de "
             "nome. Sem correspondência elas ficam sem região e sem endereço. "
@@ -544,7 +608,7 @@ def coletar(de, ate, regioes):
         print("Mantidos %d eventos sem unidade na fonte (região \"outra\")"
               % sem_unidade)
     if not any(e["cat"] == CAT_TURISMO for e in lista):
-        raise SystemExit(
+        abortar(
             "ABORTADO: nenhum evento de %s na coleta. A categoria é usada "
             "por três regras diferentes (viagem contínua, retenção e "
             "raspagem de HTML); se ela mudou de nome, as três se apagam em "
@@ -593,7 +657,7 @@ def conferir_volume(eventos, caminho_anterior):
     aí só o piso absoluto vale — é o caso da primeira execução.
     """
     if len(eventos) < MINIMO_ABSOLUTO:
-        raise SystemExit(
+        abortar(
             "ABORTADO: %d eventos coletados, abaixo do piso de %d. A resposta "
             "da API provavelmente mudou de forma. Nada foi gravado — a base "
             "anterior continua no lugar." % (len(eventos), MINIMO_ABSOLUTO))
@@ -605,7 +669,7 @@ def conferir_volume(eventos, caminho_anterior):
         return
 
     if antes and len(eventos) < antes * FRACAO_MINIMA:
-        raise SystemExit(
+        abortar(
             "ABORTADO: %d eventos contra %d da coleta anterior (%.0f%%, "
             "mínimo %.0f%%). Nada foi gravado. Se a queda for real, rode com "
             "--sem-piso." % (len(eventos), antes, 100.0 * len(eventos) / antes,

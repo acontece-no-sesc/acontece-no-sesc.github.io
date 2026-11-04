@@ -38,6 +38,14 @@ jobs:
   coletar:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    # O portão. Sem estes dois o passo bate direto no www.sescsp.org.br e
+    # toma 403 na primeira requisição, como em 31/10 e 01/11 de 2026: o
+    # CloudFront barra a faixa de IP das nuvens grandes, e os três tipos de
+    # runner do GitHub saem de lá (HANDOFF §12). Em branco, o coletor aborta
+    # dizendo exatamente isso.
+    env:
+      PORTAO_URL: ${{ secrets.PORTAO_URL }}
+      PORTAO_TOKEN: ${{ secrets.PORTAO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 

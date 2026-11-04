@@ -135,10 +135,16 @@ def buscar(url, json_esperado=False, tentativa=1):
     resposta tem de ficar com o que já tinha em vez de derrubar a passada
     inteira. O que não era contrato era a perda sair sem registro.
     """
-    req = urllib.request.Request(url, headers={
+    # `ev["link"]` vem absoluto da API, apontando para o `www` barrado — por
+    # isso a troca mora dentro do `buscar` e não na montagem da URL. A da
+    # bilheteria não é tocada: `portal.sescsp.org.br` nunca foi bloqueado.
+    destino, extra = coletor.pelo_portao(url)
+    cabecalhos = {
         "User-Agent": UA,
         "Accept": "application/json" if json_esperado else "text/html",
-    })
+    }
+    cabecalhos.update(extra)
+    req = urllib.request.Request(destino, headers=cabecalhos)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             bruto = r.read().decode("utf-8", "replace")

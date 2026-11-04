@@ -522,11 +522,20 @@ class PacienciaComOPortal(unittest.TestCase):
         self.assertEqual(len(self.pedidos), 1)
         self.assertEqual(self.relogio.dormiu, [])
 
-    def test_insiste_no_403_do_waf(self):
-        """O portal barra com 403 o tráfego que achou suspeito, e desbarra."""
-        self.fila(self.http(403), '{"ok": true}')
-        self.assertEqual(self.coletor.buscar("https://x/y"), {"ok": True})
-        self.assertEqual(len(self.pedidos), 2)
+    def test_403_levanta_na_primeira(self):
+        """Este teste já disse o contrário, e estava errado.
+
+        Quando foi escrito, 403 era lido como "o WAF barrou tráfego que achou
+        suspeito, e isso passa". Em 01/11/2026 o log mostrou o que ele é de
+        verdade aqui: a regra do CloudFront barrando a faixa de IP, igual nas
+        seis tentativas, por três dias seguidos. A rodada gastou 78 segundos
+        para chegar na mesma parede. Bloqueio não é tropeço.
+        """
+        self.fila(self.http(403), '{"nunca": "chamado"}')
+        with self.assertRaises(urllib.error.HTTPError):
+            self.coletor.buscar("https://x/y")
+        self.assertEqual(len(self.pedidos), 1)
+        self.assertEqual(self.relogio.dormiu, [])
 
     def test_pagina_de_manutencao_conta_como_falha(self):
         """A página do WAF chega com HTTP 200 e HTML dentro.
@@ -840,6 +849,118 @@ class VarreduraDeFotosNaoConfundeFalhaComFim(unittest.TestCase):
         i_trava = fonte.find("if esperadas and len(ends)")
         self.assertGreater(i_guarda, 0, "extras.py não confere a lista vazia")
         self.assertLess(i_guarda, i_trava)
+
+
+class PortaoDeSaida(unittest.TestCase):
+    """O desvio que devolveu o pipeline ao GitHub.
+
+    Desde 31/10/2026 o CloudFront do portal recusa as faixas das nuvens
+    grandes, e os três tipos de runner saem de lá. Medido no mesmo job, no
+    mesmo minuto: direto 403, por um Worker da Cloudflare 200 — inclusive a
+    listagem de 1,07 MB. O `portal.sescsp.org.br` da bilheteria nunca foi
+    barrado, e por isso não pode ser desviado à toa.
+    """
+
+    def setUp(self):
+        import coletor
+        self.coletor = coletor
+        self.portao, self.chave = coletor.PORTAO, coletor.PORTAO_CHAVE
+        coletor.PORTAO = "https://portao.exemplo.workers.dev"
+        coletor.PORTAO_CHAVE = "chave-de-teste"
+
+    def tearDown(self):
+        self.coletor.PORTAO, self.coletor.PORTAO_CHAVE = self.portao, self.chave
+
+    def test_o_www_sai_pelo_portao_com_chave(self):
+        url, cab = self.coletor.pelo_portao(
+            "https://www.sescsp.org.br/wp-json/wp/v1/unidades-atividades")
+        self.assertEqual(
+            url, "https://portao.exemplo.workers.dev/wp-json/wp/v1/unidades-atividades")
+        self.assertEqual(cab, {"x-chave": "chave-de-teste"})
+
+    def test_a_consulta_sobrevive_inteira(self):
+        """Perder a query seria coletar o dia errado, calado."""
+        url, _ = self.coletor.pelo_portao(
+            "https://www.sescsp.org.br/wp-json/wp/v1/atividades/filter"
+            "?data_inicial=2026-11-06&data_final=2026-11-06&ppp=300")
+        self.assertTrue(url.endswith(
+            "/wp-json/wp/v1/atividades/filter"
+            "?data_inicial=2026-11-06&data_final=2026-11-06&ppp=300"), url)
+
+    def test_a_bilheteria_nao_e_desviada(self):
+        """`portal.sescsp.org.br` responde ao runner; desviá-lo seria gastar
+        cota do Worker e inventar um ponto de falha onde não há nenhum."""
+        u = "https://portal.sescsp.org.br/bilheteria/atividade.action?idAtividade=9"
+        self.assertEqual(self.coletor.pelo_portao(u), (u, {}))
+
+    def test_sem_portao_nada_muda(self):
+        """Com a variável vazia o caminho é o de sempre — é o que mantém o
+        teste local honesto e o que permite desligar o portão no dia em que o
+        bloqueio cair."""
+        self.coletor.PORTAO = ""
+        u = "https://www.sescsp.org.br/qualquer/coisa"
+        self.assertEqual(self.coletor.pelo_portao(u), (u, {}))
+
+    def test_a_troca_mora_dentro_do_buscar(self):
+        """Metade das URLs não é montada por nós.
+
+        `detalhes.py` busca `ev["link"]`, que vem absoluto da API. Trocar só
+        onde montamos deixaria três mil páginas indo direto para a parede.
+        """
+        for nome in ("detalhes.py", "extras.py"):
+            fonte = ler_fonte(nome)
+            self.assertIn("coletor.pelo_portao", fonte,
+                          "%s não usa o portão" % nome)
+
+    def test_os_workflows_passam_o_portao(self):
+        """O ajudante só serve se o segredo chegar ao passo."""
+        for nome in ("atualizar.yml", "sorteios.yml"):
+            fonte = ler_fonte(os.path.join(".github", "workflows", nome))
+            self.assertIn("PORTAO_URL", fonte, "%s não passa PORTAO_URL" % nome)
+            self.assertIn("PORTAO_TOKEN", fonte, "%s não passa PORTAO_TOKEN" % nome)
+
+
+class BloqueioNaoETropeco(unittest.TestCase):
+    """403 saiu dos repetíveis quando se descobriu o que ele é aqui."""
+
+    def setUp(self):
+        import coletor
+        self.coletor = coletor
+
+    def test_403_fora_dos_repetiveis(self):
+        self.assertNotIn(403, self.coletor.REPETIVEIS,
+                         "repetir um bloqueio gasta 78s para bater na mesma parede")
+
+    def test_unidades_com_403_diz_que_e_bloqueio(self):
+        """A mensagem é o que faltou em 01/11: o log dizia só
+        'HTTP Error 403: Forbidden', e o que isso significava levou um dia de
+        medição para aparecer."""
+        import contextlib
+
+        def falso_buscar(url, tentativa=1):
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+        original = self.coletor.buscar
+        self.coletor.buscar = falso_buscar
+        try:
+            with self.assertRaises(SystemExit) as ctx, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.coletor.carregar_unidades()
+        finally:
+            self.coletor.buscar = original
+        msg = str(ctx.exception)
+        self.assertIn("CloudFront", msg)
+        self.assertIn("PORTAO_URL", msg)
+
+    def test_abortar_fala_na_aba_actions(self):
+        """`raise SystemExit` escreve no stderr, e stderr só se lê com login.
+        Foi por isso que a falha de 31/10 teve de ser diagnosticada pela
+        duração dos passos. `::error::` vira annotation, que é pública."""
+        saida = io.StringIO()
+        import contextlib
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(saida):
+            self.coletor.abortar("ABORTADO: por este motivo aqui.")
+        self.assertIn("::error::ABORTADO: por este motivo aqui.", saida.getvalue())
 
 
 class FaltantesNaoCongelaPreco(unittest.TestCase):
