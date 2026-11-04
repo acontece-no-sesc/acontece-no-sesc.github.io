@@ -22,11 +22,28 @@ permissions:
 
 jobs:
   sondar:
-    runs-on: ubuntu-latest
+    # Os três tipos de runner hospedado, porque é a última possibilidade que
+    # sobra dentro do GitHub. Linux e Windows são máquinas Azure e a aposta é
+    # que levem o mesmo 403; o macOS é a incógnita, porque historicamente não
+    # roda na mesma infraestrutura — se ele passar, o pipeline inteiro
+    # continua no GitHub, sem VPS nenhuma, e de graça (repositório público
+    # tem minuto ilimitado em todos os tipos).
+    #
+    # O IP de saída de cada um sai no log: é o que diz qual faixa está na
+    # regra do CloudFront.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: De onde este runner sai
         run: |
+          echo "runner: ${{ matrix.os }}"
           echo "IP de saída: $(curl -s --max-time 20 https://api.ipify.org || echo '?')"
 
       # O mesmo UA do coletor, um UA de navegador e nenhum UA, contra três
@@ -35,6 +52,7 @@ jobs:
       # regra de WAF; se for de todos, é o cliente que está barrado.
       - name: Medir
         run: |
+          echo "### runner: ${{ matrix.os }}"
           UA_NOSSO='agenda-sesc-prototipo/1.0 (coletor de programacao publica; uso pessoal)'
           UA_NAV='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
           medir () {
