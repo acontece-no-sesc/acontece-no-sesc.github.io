@@ -263,7 +263,11 @@ def main():
                 "real, confira /wp-json/wp/v1/unidades-atividades."
                 % (len(ends), esperadas))
 
-    base["extrasEm"] = time.strftime("%Y-%m-%dT%H:%M:%S-03:00")
+    # Era `time.strftime` com "-03:00" colado no fim: no runner, que roda em
+    # UTC, o carimbo saía três horas no futuro (extrasEm 14:21 -03:00 numa
+    # passada que terminou 14:21 UTC). `coletor.agora_br` é o mesmo relógio
+    # de `geradoEm` e `enriquecidoEm`.
+    base["extrasEm"] = coletor.agora_br().isoformat(timespec="seconds")
     json.dump(base, open(caminho, "w", encoding="utf-8"),
               ensure_ascii=False, separators=(",", ":"))
 

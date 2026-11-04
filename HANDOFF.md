@@ -1183,3 +1183,32 @@ remote `antigo`. Existiam de verdade, só que onde nada roda. O sintoma foi
 `PORTAO_URL` chegando vazio ao runner, sem erro nenhum. De passagem: o GitHub
 **nunca** mostra um segredo de volta, nem ao dono — editar e ver o campo em
 branco é o comportamento normal, não um segredo vazio.
+
+### 12.5 O portão atravessou uma coleta inteira — 04/11/2026
+
+Execução 41836747699, das 13h17 às 14h21 UTC, verde de ponta a ponta. O que
+ela mediu, e que nenhuma rodada desde 31/10 havia conseguido medir:
+
+| passo | resultado |
+|---|---|
+| listagem, 60 dias | 3.036 eventos, **nenhum dia com FALHOU** |
+| detalhes (3.036 páginas, 56 min) | `sem resposta=0`, 3.007 descrições |
+| extras (varredura + 44 unidades) | `0 URLs sem resposta`, 44/44 endereços |
+
+Zero falha de rede em ~3.200 requisições pelo Worker. A paciência reforçada da
+§11 não precisou de um único degrau — o que custava a rodada era o 403, não a
+instabilidade que eu havia diagnosticado primeiro.
+
+O site publicou às 14h21 UTC: `geradoEm` 04/11 10h21, `enriquecidoEm` 11h17,
+3.029 eventos depois da retenção, descrições servidas como
+`dados/desc/<id>.json` (conferido: HTTP 200).
+
+**Os crons nunca saíram.** O passo 8 do `vps/LEIAME.md` manda removê-los, mas
+isso era o plano da §12.1, que não foi executado. `atualizar.yml` continua em
+`10 8` e `10 20`, `sorteios.yml` em `*/20 16-23` — o que os impedia de
+funcionar era o 403, e é ele que o portão contorna. Nada a reativar.
+
+Um achado de passagem ao conferir a base publicada: `extrasEm` saía **três
+horas no futuro**. Era `time.strftime("…-03:00")`, com o fuso colado no texto,
+num runner que roda em UTC. Campo que ninguém lê — e por isso ninguém viu.
+Agora usa `coletor.agora_br`, como os outros dois carimbos, com teste.

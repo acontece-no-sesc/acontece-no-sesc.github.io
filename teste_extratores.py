@@ -851,6 +851,28 @@ class VarreduraDeFotosNaoConfundeFalhaComFim(unittest.TestCase):
         self.assertLess(i_guarda, i_trava)
 
 
+class OsTresCarimbosNoMesmoRelogio(unittest.TestCase):
+    """`extrasEm` saía três horas no futuro.
+
+    Era `time.strftime("…-03:00")`: o relógio do runner é UTC e o "-03:00"
+    estava colado no texto, então a passada que terminou às 14:21 UTC se
+    carimbava 14:21 de Brasília. Ninguém lia o campo, e por isso ninguém viu
+    — mas `geradoEm` e `enriquecidoEm` saem de `coletor.agora_br`, e um
+    carimbo que mente sobre o próprio fuso é o tipo de coisa que só aparece
+    quando alguém for comparar os três.
+    """
+
+    def test_extras_usa_o_relogio_de_brasilia(self):
+        # A conferência é na LINHA do carimbo, não no arquivo todo: o
+        # comentário ao lado dela cita o "-03:00" antigo de propósito.
+        linha = [l for l in ler_fonte("extras.py").splitlines()
+                 if 'base["extrasEm"] =' in l]
+        self.assertEqual(len(linha), 1, "extras.py não carimba extrasEm")
+        self.assertIn("coletor.agora_br()", linha[0])
+        self.assertNotIn("-03:00", linha[0],
+                         "fuso colado no texto volta a mentir fora do Brasil")
+
+
 class PortaoDeSaida(unittest.TestCase):
     """O desvio que devolveu o pipeline ao GitHub.
 
